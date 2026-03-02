@@ -18,11 +18,6 @@ class InterviewTemplate(Base):
     
     settings: Mapped[dict] = mapped_column(JSON, nullable=True)
 
-    is_rule_based: Mapped[bool] = mapped_column(Boolean, default=False)
-    total_questions: Mapped[int] = mapped_column(Integer, nullable=True)
-    difficulty_distribution: Mapped[dict] = mapped_column(JSON, nullable=True)
-    category_filters: Mapped[list[str]] = mapped_column(JSON, nullable=True)
-
     questions: Mapped[list["TemplateQuestion"]] = relationship("TemplateQuestion", back_populates="template", cascade="all, delete-orphan")
     interviews: Mapped[list["Interview"]] = relationship("Interview", back_populates="template")
 
