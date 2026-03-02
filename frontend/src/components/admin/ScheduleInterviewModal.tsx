@@ -2,8 +2,8 @@
 
 import { useState, useEffect } from 'react';
 import { InterviewTemplate } from '@/types/interview';
-import { fetchInterviewTemplates, scheduleInterview, rescheduleInterview } from '@/lib/api/interviews';
-import { SchedulingApiError } from '@/types/interview';
+import { fetchInterviewTemplates, scheduleInterview, rescheduleInterview, previewTemplate } from '@/lib/api/interviews';
+import { SchedulingApiError, TemplatePreviewQuestion } from '@/types/interview';
 
 type ModalMode = 'schedule' | 'reschedule';
 
@@ -42,10 +42,39 @@ export default function ScheduleInterviewModal({
         return new Date(d.getTime() - offset).toISOString().slice(0, 16);
     };
 
+    const [previewQuestions, setPreviewQuestions] = useState<TemplatePreviewQuestion[]>([]);
+    const [previewLoading, setPreviewLoading] = useState(false);
+
+    // ─── Fetch preview when templateId changes ───────────────────────────────
+    useEffect(() => {
+        if (mode !== 'schedule' || !templateId) {
+            setPreviewQuestions([]); // Clear preview if templateId is not selected or mode is not schedule
+            return;
+        }
+
+        setPreviewLoading(true);
+        previewTemplate(templateId)
+            .then((data) => {
+                // Store original text for comparison on submission
+                const augmented = data.questions.map(q => ({
+                    ...q,
+                    originalText: q.text
+                }));
+                setPreviewQuestions(augmented);
+            })
+            .catch((err: SchedulingApiError) => {
+                setError(`Failed to load template preview: ${err.detail}`);
+                setPreviewQuestions([]);
+            })
+            .finally(() => setPreviewLoading(false));
+    }, [templateId, mode]);
+
     const [scheduledAt, setScheduledAt] = useState(nowLocal);
     const [loading, setLoading] = useState(false);
     const [templatesLoading, setTemplatesLoading] = useState(false);
     const [error, setError] = useState('');
+    const [editingIdx, setEditingIdx] = useState<number | null>(null);
+    const [tempEditText, setTempEditText] = useState('');
 
     // ─── Prefill for reschedule ───────────────────────────────────────────────
     useEffect(() => {
@@ -62,17 +91,18 @@ export default function ScheduleInterviewModal({
             .then((data) => {
                 const active = data.filter((t) => t.is_active);
                 setTemplates(active);
-                if (active.length > 0) setTemplateId(active[0].id);
+                // Only set initial template if not already set
+                if (active.length > 0 && !templateId) {
+                    setTemplateId(active[0].id);
+                }
             })
             .catch((err: SchedulingApiError) => {
                 if (err.status === 401 || err.status === 403) onAuthError();
-                // Fallback: use a valid 24-char hex ObjectId placeholder
-                // so the backend doesn't reject it while templates are unavailable
                 setTemplates([]);
                 setTemplateId('');
             })
             .finally(() => setTemplatesLoading(false));
-    }, [mode, onAuthError]);
+    }, [mode, onAuthError, templateId]);
 
     // ─── Submit ───────────────────────────────────────────────────────────────
     const handleSubmit = async (e: React.FormEvent) => {
@@ -94,7 +124,18 @@ export default function ScheduleInterviewModal({
             const isoAt = new Date(scheduledAt).toISOString();
 
             if (mode === 'schedule') {
-                await scheduleInterview({ candidate_id: candidateId, template_id: templateId, scheduled_at: isoAt });
+                const questions = previewQuestions.map((q, idx) => ({
+                    question_id: q.question_id,
+                    // Fix: send custom_text ONLY if modified.
+                    custom_text: q.text !== q.originalText ? q.text : undefined,
+                    order: idx + 1
+                }));
+                await scheduleInterview({
+                    candidate_id: candidateId,
+                    template_id: templateId,
+                    scheduled_at: isoAt,
+                    questions
+                });
             } else {
                 if (!interviewId) throw new Error('Missing interview ID for reschedule');
                 await rescheduleInterview(interviewId, { scheduled_at: isoAt });
@@ -183,6 +224,102 @@ export default function ScheduleInterviewModal({
                                         </option>
                                     ))}
                                 </select>
+                            )}
+                        </div>
+                    )}
+
+                    {/* Preview Questions (Editable List) */}
+                    {mode === 'schedule' && templateId && (
+                        <div className="space-y-3">
+                            <label className="block text-sm font-medium text-gray-700">
+                                Interview Questions ({previewQuestions.length})
+                            </label>
+
+                            {previewLoading ? (
+                                <div className="text-sm text-gray-500 italic flex items-center gap-2">
+                                    <svg className="animate-spin h-4 w-4 text-blue-500" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                                    </svg>
+                                    Generating preview...
+                                </div>
+                            ) : (
+                                <div className="space-y-3 max-h-60 overflow-y-auto pr-2 custom-scrollbar border border-gray-100 rounded-lg p-3 bg-gray-50">
+                                    {previewQuestions.map((q, idx) => (
+                                        <div key={idx} className="group relative bg-white border hover:border-blue-200 rounded-lg p-3 transition-all duration-200 shadow-sm">
+                                            <div className="flex justify-between items-center mb-2">
+                                                <span className="text-[10px] font-bold uppercase tracking-wider text-gray-400 bg-gray-100 px-1.5 py-0.5 rounded">
+                                                    Q{idx + 1} • {q.difficulty} • {q.category}
+                                                </span>
+                                                <div className="flex items-center gap-2">
+                                                    {editingIdx !== idx && (
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => {
+                                                                setEditingIdx(idx);
+                                                                setTempEditText(q.text);
+                                                            }}
+                                                            className="text-[10px] font-bold text-blue-500 hover:text-blue-700 uppercase"
+                                                        >
+                                                            Edit
+                                                        </button>
+                                                    )}
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => setPreviewQuestions(prev => prev.filter((_, i) => i !== idx))}
+                                                        className="text-gray-300 hover:text-red-500 transition-colors opacity-0 group-hover:opacity-100"
+                                                        title="Remove question"
+                                                    >
+                                                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                                                        </svg>
+                                                    </button>
+                                                </div>
+                                            </div>
+
+                                            {editingIdx === idx ? (
+                                                <div className="space-y-2">
+                                                    <textarea
+                                                        autoFocus
+                                                        value={tempEditText}
+                                                        onChange={(e) => setTempEditText(e.target.value)}
+                                                        className="w-full text-sm text-gray-700 bg-white border border-blue-100 rounded p-2 focus:ring-1 focus:ring-blue-500 outline-none resize-none"
+                                                        rows={3}
+                                                    />
+                                                    <div className="flex justify-end gap-2">
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => setEditingIdx(null)}
+                                                            className="text-xs text-gray-400 hover:text-gray-600 px-2 py-1"
+                                                        >
+                                                            Cancel
+                                                        </button>
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => {
+                                                                setPreviewQuestions(prev => prev.map((item, i) => i === idx ? { ...item, text: tempEditText } : item));
+                                                                setEditingIdx(null);
+                                                            }}
+                                                            className="text-xs bg-blue-500 text-white px-2 py-1 rounded hover:bg-blue-600"
+                                                        >
+                                                            Save
+                                                        </button>
+                                                    </div>
+                                                </div>
+                                            ) : (
+                                                <p className="text-sm text-gray-700 font-medium leading-relaxed whitespace-pre-wrap">
+                                                    {q.text}
+                                                </p>
+                                            )}
+                                        </div>
+                                    ))}
+
+                                    {previewQuestions.length === 0 && (
+                                        <div className="text-center py-6 border-2 border-dashed border-gray-100 rounded-lg">
+                                            <p className="text-xs text-gray-400">No questions selected.</p>
+                                        </div>
+                                    )}
+                                </div>
                             )}
                         </div>
                     )}

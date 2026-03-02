@@ -9,7 +9,9 @@ from app.db.sql.unit_of_work import UnitOfWork
 from app.db.sql.enums import InterviewStatus, UserRole
 from app.db.sql.models.interview import Interview
 from app.db.sql.models.interview_template import InterviewTemplate
+from app.db.sql.models.interview_session_question import InterviewSessionQuestion
 from app.services.question_generator_service import question_generator_service
+from app.services.template_engine import template_engine
 
 class InterviewAdminSQLService:
     @staticmethod
@@ -25,7 +27,14 @@ class InterviewAdminSQLService:
             )
 
     @staticmethod
-    async def create_interview(session: AsyncSession, template_id: uuid.UUID, candidate_id: uuid.UUID, assigned_by: uuid.UUID, scheduled_at: datetime) -> Interview:
+    async def create_interview(
+        session: AsyncSession, 
+        template_id: uuid.UUID, 
+        candidate_id: uuid.UUID, 
+        assigned_by: uuid.UUID, 
+        scheduled_at: datetime,
+        questions: Optional[List[Any]] = None
+    ) -> Interview:
         async with UnitOfWork(session) as uow:
             # 1. Validate candidate
             candidate = await uow.users.get_by_id(candidate_id)
@@ -42,17 +51,38 @@ class InterviewAdminSQLService:
                 raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Candidate already has an active interview (status: scheduled or in_progress)")
 
             # 3. Validate template (Not in uow natively, so using session directly within transaction)
-            result = await session.execute(select(InterviewTemplate).where(InterviewTemplate.id == template_id))
+            result = await session.execute(
+                select(InterviewTemplate)
+                .where(InterviewTemplate.id == template_id)
+                .with_for_update()
+            )
             template = result.scalar_one_or_none()
             if not template:
                 raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Interview template not found")
             if not template.is_active:
                 raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Interview template is not active")
 
-            # 4. Validate time
-            InterviewAdminSQLService._assert_future_datetime(scheduled_at)
+            # 4. Determine final questions set
+            if questions is not None:
+                if len(questions) == 0:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="Interview must contain at least one question."
+                    )
+                # Use provided custom questions
+                final_questions = questions
+            else:
+                # Fallback: Generate using Template Engine
+                generated_questions = await template_engine.generate_questions_from_template(
+                    template_id=template_id,
+                    session=session
+                )
+                final_questions = [
+                    {"question_id": q.id, "custom_text": None, "original_text": q.text}
+                    for q in generated_questions
+                ]
 
-            # 5. Build questions using resume and JD
+            # 5. Build legacy CuratedQuestions JSON (mock/sync)
             resume_id = None
             resume_text = None
             job_description = None
@@ -69,6 +99,7 @@ class InterviewAdminSQLService:
                 job_description=job_description,
             )
 
+            # 6. Create Interview
             interview = Interview(
                 candidate_id=candidate_id,
                 template_id=template_id,
@@ -79,6 +110,27 @@ class InterviewAdminSQLService:
             )
             
             uow.interviews.create_interview(interview)
+            await uow.flush()
+
+            # 7. Insert InterviewSessionQuestion rows
+            # Normalize order server-side: Never trust client order
+            for i, q_data in enumerate(final_questions, 1):
+                # Handle both Pydantic model and dict safely
+                if isinstance(q_data, dict):
+                    q_id = q_data.get("question_id")
+                    c_text = q_data.get("custom_text")
+                else:
+                    q_id = getattr(q_data, "question_id", None)
+                    c_text = getattr(q_data, "custom_text", None)
+
+                session_q = InterviewSessionQuestion(
+                    interview_id=interview.id,
+                    question_id=q_id,
+                    custom_text=c_text,
+                    order=i,
+                )
+                session.add(session_q)
+
             await uow.flush()
             
             return interview

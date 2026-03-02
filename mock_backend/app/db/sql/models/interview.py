@@ -6,6 +6,8 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.sql.base import Base
 from app.db.sql.enums import InterviewStatus
+from app.db.sql.models.interview_session import InterviewSession
+from app.db.sql.models.interview_session_question import InterviewSessionQuestion
 
 class Interview(Base):
     __tablename__ = "interviews"
@@ -35,3 +37,4 @@ class Interview(Base):
     assigner: Mapped["User"] = relationship("User", foreign_keys=[assigned_by])
     template: Mapped["InterviewTemplate"] = relationship("InterviewTemplate", back_populates="interviews")
     sessions: Mapped[list["InterviewSession"]] = relationship("InterviewSession", back_populates="interview", cascade="all, delete-orphan")
+    session_questions: Mapped[list["InterviewSessionQuestion"]] = relationship("InterviewSessionQuestion", back_populates="interview", cascade="all, delete-orphan")

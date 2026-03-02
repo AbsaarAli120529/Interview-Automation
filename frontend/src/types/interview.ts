@@ -37,10 +37,29 @@ export interface CandidateWithInterview {
 
 // ─── Request / Response shapes ───────────────────────────────────────────────
 
+export interface InterviewSessionQuestionCreate {
+    question_id?: string;
+    custom_text?: string;
+    order: number;
+}
+
 export interface ScheduleInterviewRequest {
     candidate_id: string;
     template_id: string;
     scheduled_at: string; // ISO 8601 UTC
+    questions?: InterviewSessionQuestionCreate[];
+}
+
+export interface TemplatePreviewQuestion {
+    question_id: string;
+    text: string;
+    originalText?: string; // Keep track of the text before editing
+    difficulty: string;
+    category: string;
+}
+
+export interface TemplatePreviewResponse {
+    questions: TemplatePreviewQuestion[];
 }
 
 export interface RescheduleInterviewRequest {

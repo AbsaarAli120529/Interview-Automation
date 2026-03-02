@@ -17,6 +17,7 @@ class InterviewTemplate(Base):
     updated_at: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
     
     settings: Mapped[dict] = mapped_column(JSON, nullable=True)
+    is_rule_based: Mapped[bool] = mapped_column(Boolean, default=False)
 
     questions: Mapped[list["TemplateQuestion"]] = relationship("TemplateQuestion", back_populates="template", cascade="all, delete-orphan")
     interviews: Mapped[list["Interview"]] = relationship("Interview", back_populates="template")

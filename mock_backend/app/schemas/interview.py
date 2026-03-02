@@ -1,3 +1,4 @@
+import uuid
 from pydantic import BaseModel, Field
 from typing import Optional, List, Any, Literal
 from datetime import datetime
@@ -5,11 +6,18 @@ from datetime import datetime
 
 # ─── Request Schemas ─────────────────────────────────────────────────────────
 
+class InterviewSessionQuestionCreate(BaseModel):
+    """Schema for creating a session question with optional overrides."""
+    question_id: Optional[uuid.UUID] = None
+    custom_text: Optional[str] = None
+    order: int
+
 class ScheduleInterviewRequest(BaseModel):
     """Request body for POST /admin/interviews/schedule"""
     candidate_id: str = Field(..., description="UUID of the candidate user")
     template_id: str = Field(..., description="UUID of the interview template")
     scheduled_at: datetime = Field(..., description="Future UTC datetime for the interview")
+    questions: Optional[List[InterviewSessionQuestionCreate]] = Field(None, description="Optional custom questions to override template defaults")
 
 
 class RescheduleInterviewRequest(BaseModel):

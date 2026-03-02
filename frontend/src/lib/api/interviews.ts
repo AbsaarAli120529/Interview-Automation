@@ -12,6 +12,7 @@ import {
     InterviewTemplate,
     CandidateInterview,
     SchedulingApiError,
+    TemplatePreviewResponse,
 } from '@/types/interview';
 
 // Re-export so consumers can import from this module
@@ -61,6 +62,20 @@ export async function fetchInterviewTemplates(): Promise<InterviewTemplate[]> {
     const res = await fetch(`${BASE_URL}/api/v1/admin/interviews/templates`, {
         headers: authHeaders(),
     });
+    if (!res.ok) throw await parseError(res);
+    return res.json();
+}
+
+export async function previewTemplate(
+    templateId: string
+): Promise<TemplatePreviewResponse> {
+    const res = await fetch(
+        `${BASE_URL}/api/v1/admin/interviews/templates/${templateId}/preview`,
+        {
+            method: 'POST',
+            headers: authHeaders(),
+        }
+    );
     if (!res.ok) throw await parseError(res);
     return res.json();
 }
