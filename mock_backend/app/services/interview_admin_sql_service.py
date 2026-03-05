@@ -86,17 +86,24 @@ class InterviewAdminSQLService:
             resume_id = None
             resume_text = None
             job_description = None
+            resume_json = None
+            jd_json = None
             if candidate.candidate_profile:
                 resume_id = candidate.candidate_profile.resume_id
                 resume_text = getattr(candidate.candidate_profile, "resume_text", None) or ""
                 job_description = getattr(candidate.candidate_profile, "job_description", None) or ""
+                resume_json = getattr(candidate.candidate_profile, "resume_json", None)
+                jd_json = getattr(candidate.candidate_profile, "jd_json", None)
 
-            curated_questions = question_generator_service.generate_curated_questions(
+            curated_questions = await question_generator_service.generate_curated_questions(
+                session=session,
                 template_id=str(template_id),
                 candidate_id=str(candidate_id),
                 resume_id=resume_id,
                 resume_text=resume_text,
                 job_description=job_description,
+                resume_json=resume_json,
+                jd_json=jd_json,
             )
 
             # 6. Create Interview

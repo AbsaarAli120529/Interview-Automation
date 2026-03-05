@@ -3,7 +3,7 @@ import logging
 import uuid
 from datetime import timedelta, datetime, timezone
 from typing import List, Optional
-from fastapi import APIRouter, HTTPException, status, Depends, Form, UploadFile, File, BackgroundTasks
+from fastapi import APIRouter, HTTPException, status, Depends, Form, UploadFile, File, BackgroundTasks, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.security import OAuth2PasswordBearer
 from jose import JWTError, jwt
@@ -26,7 +26,73 @@ logger = logging.getLogger(__name__)
 CANDIDATE_MATERIALS_COLLECTION = "candidate_materials"
 router = APIRouter()
 
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login")
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login", auto_error=False)
+
+async def get_token_from_header(request: Request) -> Optional[str]:
+    """Extract token from Authorization header - works with FormData requests."""
+    authorization = request.headers.get("Authorization")
+    if not authorization:
+        return None
+    if authorization.startswith("Bearer "):
+        return authorization.split(" ")[1]
+    return None
+
+async def get_current_user_from_request(
+    request: Request,
+    session: AsyncSession = Depends(get_db_session)
+) -> User:
+    """Get current user from request - works with both JSON and FormData."""
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    
+    # Try to get token from header first (works with FormData)
+    token = await get_token_from_header(request)
+    
+    # Fallback to OAuth2PasswordBearer (works with JSON)
+    # Note: oauth2_scheme with auto_error=False returns None if not found
+    if not token:
+        token = await oauth2_scheme(request)
+    
+    if not token:
+        logger.warning(f"Authentication failed: No token found in request headers")
+        raise credentials_exception
+    
+    try:
+        payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
+        user_id_str: str = payload.get("sub")
+        if user_id_str is None:
+            raise credentials_exception
+            
+        try:
+            user_id = uuid.UUID(user_id_str)
+        except ValueError:
+            raise credentials_exception
+            
+    except JWTError:
+        raise credentials_exception
+    
+    async with UnitOfWork(session) as uow:
+        user = await uow.users.get_by_id(user_id)
+        if user is None:
+            raise credentials_exception
+        return user
+
+async def get_current_active_user_from_request(
+    current_user: User = Depends(get_current_user_from_request)
+):
+    if not current_user.is_active:
+        raise HTTPException(status_code=400, detail="Inactive user")
+    return current_user
+
+async def get_current_admin_from_request(
+    current_user: User = Depends(get_current_active_user_from_request)
+):
+    if current_user.role != UserRole.ADMIN:
+        raise HTTPException(status_code=403, detail="The user doesn't have enough privileges")
+    return current_user
 
 def validate_uuid(id_str: str) -> uuid.UUID:
     try:
@@ -201,9 +267,11 @@ async def admin_register_candidate(
     job_description: str = Form(""),
     resume: UploadFile = File(...),
     background_tasks: BackgroundTasks = None,
-    current_admin: User = Depends(get_current_admin),
+    current_admin: User = Depends(get_current_admin_from_request),
     session: AsyncSession = Depends(get_db_session)
 ):
+    """Register a new candidate. Requires admin authentication."""
+    logger.info(f"Admin {current_admin.username} (ID: {current_admin.id}) registering candidate: {candidate_email}")
     async with UnitOfWork(session) as uow:
         username = candidate_email.split('@')[0]
         
@@ -216,12 +284,10 @@ async def admin_register_candidate(
         
         resume_id = secrets.token_hex(8)
         
-        # Save resume file and extract text
+        # Save resume file and extract text using LLM parsing
         import os
-        import shutil
-        from app.services.resume_parser import extract_text_from_pdf
-        
-        from app.services.resume_parser import extract_text_from_pdf
+        import json
+        from app.services.resume_parser import save_resume_and_extract_text
         
         upload_rel_dir = os.path.join("uploads", "resumes")
         upload_dir = os.path.join(settings.BASE_DIR, upload_rel_dir)
@@ -232,23 +298,21 @@ async def admin_register_candidate(
         if len(resume_bytes) == 0:
             raise HTTPException(status_code=400, detail="Resume file is empty")
         
-        # Extract text from resume (parse before saving to get text)
-        resume_text = ""
-        try:
-            if resume.content_type and "pdf" in resume.content_type:
-                resume_text = extract_text_from_pdf(resume_bytes)
-        except Exception as e:
-            logger.warning(f"Failed to extract text from resume: {e}")
-            resume_text = ""
+        # Save resume and parse with LLM
+        resume_text, resume_path, parsed_data = save_resume_and_extract_text(
+            candidate_id=str(resume_id),  # Temporary ID before user creation
+            resume_id=resume_id,
+            content=resume_bytes,
+            content_type=resume.content_type or "application/pdf"
+        )
         
-        # Save resume file
-        resume_path = os.path.join(upload_dir, f"{resume_id}.pdf")
-        try:
-            with open(resume_path, "wb") as buffer:
-                buffer.write(resume_bytes)
-        except Exception as e:
-            logger.error(f"Failed to save resume file: {e}")
+        if not resume_path:
             raise HTTPException(status_code=500, detail="Failed to save resume file")
+        
+        # Store parsed JSON data
+        resume_json = None
+        if parsed_data:
+            resume_json = parsed_data
         
         names = candidate_name.split(" ", 1)
         first_name = names[0]
@@ -261,16 +325,37 @@ async def admin_register_candidate(
             hashed_password=hashed_password,
         )
         
+        # Parse JD with LLM
+        from app.services.resume_jd_parser import resume_jd_parser
+        jd_parsed = resume_jd_parser.parse_job_description(job_description) if job_description else {}
+        
+        # Extract skills from parsed resume data
+        skills_list = []
+        if parsed_data and 'skills' in parsed_data:
+            skills_list = parsed_data['skills']
+        elif resume_json and 'skills' in resume_json:
+            skills_list = resume_json['skills']
+        
+        # Extract years of experience
+        experience_years = None
+        if parsed_data and 'years_of_experience' in parsed_data:
+            experience_years = parsed_data['years_of_experience']
+        elif resume_json and 'years_of_experience' in resume_json:
+            experience_years = resume_json['years_of_experience']
+        
         profile = CandidateProfile(
             first_name=first_name,
             last_name=last_name,
             resume_id=resume_id,
-            skills=[],
-            job_description=job_description,  # Store JD in profile
+            skills=skills_list,
+            experience_years=experience_years,
+            job_description=job_description,  # Store JD text in profile
             resume_text=resume_text or "",  # Store parsed resume text
             resume_filename=resume.filename,
             resume_path=os.path.join(upload_rel_dir, f"{resume_id}.pdf"),
-            parse_status="pending"
+            resume_json=resume_json if resume_json else parsed_data,  # Store structured resume data
+            jd_json=jd_parsed,  # Store structured JD data
+            parse_status="completed" if parsed_data else "pending"
         )
         new_user.candidate_profile = profile
         
@@ -281,18 +366,30 @@ async def admin_register_candidate(
         if background_tasks:
             background_tasks.add_task(parse_candidate_resume, new_user.id)
         
-        # Print credentials to terminal
-        print("\n" + "="*70)
-        print(" " * 20 + "CANDIDATE REGISTRATION SUCCESSFUL")
-        print("="*70)
-        print(f" Candidate Name: {candidate_name}")
-        print(f" Email: {candidate_email}")
-        print(f" Username: {username}")
-        print(f" Password: {password}")
-        print(f" Candidate ID: {new_user.id}")
-        print("="*70)
-        print(" " * 15 + "IMPORTANT: Save these credentials!")
-        print("="*70 + "\n")
+        # Print credentials to terminal - Make it very visible
+        separator = "="*80
+        print("\n\n" + separator)
+        print(" " * 25 + "🔐 CANDIDATE REGISTRATION SUCCESSFUL 🔐")
+        print(separator)
+        print(f" 📋 Candidate Name:     {candidate_name}")
+        print(f" 📧 Email:              {candidate_email}")
+        print(f" 👤 Username:           {username}")
+        print(f" 🔑 Password:           {password}")
+        print(f" 🆔 Candidate ID:       {new_user.id}")
+        print(separator)
+        print(" " * 20 + "⚠️  IMPORTANT: Save these credentials! ⚠️")
+        print(" " * 15 + "These credentials are needed for candidate login.")
+        print(separator + "\n\n")
+        
+        # Also log to logger for persistence
+        logger.info("="*80)
+        logger.info("CANDIDATE REGISTRATION SUCCESSFUL")
+        logger.info(f"Candidate Name: {candidate_name}")
+        logger.info(f"Email: {candidate_email}")
+        logger.info(f"Username: {username}")
+        logger.info(f"Password: {password}")
+        logger.info(f"Candidate ID: {new_user.id}")
+        logger.info("="*80)
         
         await email_service.send_candidate_password_email(candidate_email, candidate_name, password)
         

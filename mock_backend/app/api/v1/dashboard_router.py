@@ -1,16 +1,56 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, distinct
 from typing import Dict
+from jose import JWTError, jwt
+from fastapi.security import OAuth2PasswordBearer
 
 from app.db.sql.session import get_db_session
+from app.db.sql.unit_of_work import UnitOfWork
 from app.db.sql.models.interview import Interview
-from app.db.sql.enums import InterviewStatus
+from app.db.sql.models.user import User
+from app.db.sql.enums import InterviewStatus, UserRole
+from app.core.config import settings
+
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login")
+
+async def get_current_admin_from_token(token: str = Depends(oauth2_scheme), session: AsyncSession = Depends(get_db_session)):
+    """Get current admin user from token - extracted to avoid circular import."""
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    try:
+        payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
+        user_id_str: str = payload.get("sub")
+        if user_id_str is None:
+            raise credentials_exception
+    except JWTError:
+        raise credentials_exception
+    
+    async with UnitOfWork(session) as uow:
+        import uuid
+        try:
+            user_id = uuid.UUID(user_id_str)
+        except ValueError:
+            raise credentials_exception
+        user = await uow.users.get_by_id(user_id)
+        if user is None:
+            raise credentials_exception
+        if user.role != UserRole.ADMIN:
+            raise HTTPException(status_code=403, detail="The user doesn't have enough privileges")
+        if not user.is_active:
+            raise HTTPException(status_code=400, detail="Inactive user")
+        return user
 
 router = APIRouter()
 
 @router.get("/stats")
-async def get_dashboard_stats(session: AsyncSession = Depends(get_db_session)) -> Dict[str, int]:
+async def get_dashboard_stats(
+    current_admin: User = Depends(get_current_admin_from_token),
+    session: AsyncSession = Depends(get_db_session)
+) -> Dict[str, int]:
     """
     Get dashboard statistics using real database aggregates.
     """
@@ -20,15 +60,25 @@ async def get_dashboard_stats(session: AsyncSession = Depends(get_db_session)) -
     result_completed = await session.execute(select(func.count(Interview.id)).where(Interview.status == InterviewStatus.COMPLETED))
     completed = result_completed.scalar() or 0
 
-    result_pending = await session.execute(select(func.count(Interview.id)).where(Interview.status == InterviewStatus.PENDING_REVIEW))
+    result_pending = await session.execute(select(func.count(Interview.id)).where(Interview.status == InterviewStatus.SCHEDULED))
     pending_review = result_pending.scalar() or 0
 
     result_candidates = await session.execute(select(func.count(distinct(Interview.candidate_id))))
     total_candidates = result_candidates.scalar() or 0
 
+    # Count in_progress as pending
+    result_in_progress = await session.execute(select(func.count(Interview.id)).where(Interview.status == InterviewStatus.IN_PROGRESS))
+    in_progress = result_in_progress.scalar() or 0
+    
+    # Total pending = scheduled + in_progress
+    pending = pending_review + in_progress
+    
+    # Flagged interviews (not implemented yet, return 0)
+    flagged = 0
+    
     return {
         "total_interviews": total_interviews,
         "completed": completed,
-        "pending_review": pending_review,
-        "total_candidates": total_candidates
+        "pending": pending,
+        "flagged": flagged
     }

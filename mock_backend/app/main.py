@@ -17,9 +17,9 @@ logging.basicConfig(
     level=logging.DEBUG,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
-logger = logging.getLogger(__name__)
+logger = logging.getLogger(__name__) 
 
-@asynccontextmanager
+@asynccontextmanager  
 async def lifespan(app: FastAPI):
     # ── Step 1: Verify database connectivity ──────────────────────────────────
     logger.info("Initializing application and checking database connection...")

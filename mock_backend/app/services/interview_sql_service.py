@@ -7,6 +7,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.sql.unit_of_work import UnitOfWork
 from app.db.sql.enums import InterviewStatus
 from app.db.sql.models.interview_session import InterviewSession
+from app.db.sql.models.interview_session_question import InterviewSessionQuestion
+from app.db.sql.models.question import Question
 
 class InterviewSQLService:
     @staticmethod
@@ -34,35 +36,41 @@ class InterviewSQLService:
                 
                 # Check verification status
                 candidate = await uow.users.get_by_id(candidate_id)
-                verification_ready = True
+                face_verified = False
+                voice_verified = False
                 if candidate and candidate.candidate_profile:
-                    verification_ready = (
-                        candidate.candidate_profile.face_verified and 
-                        candidate.candidate_profile.voice_verified
-                    )
+                    face_verified = candidate.candidate_profile.face_verified or False
+                    voice_verified = candidate.candidate_profile.voice_verified or False
                 
+                verification_ready = face_verified and voice_verified
                 can_start = time_ready and verification_ready
+                
+                # Format scheduled_at as ISO string if it exists
+                scheduled_at_str = scheduled_at.isoformat() if scheduled_at else None
                 
                 return {
                     "interview_id": str(interview_id),
                     "session_id": None,
                     "status": interview_status.value,
-                    "scheduled_at": scheduled_at,
+                    "scheduled_at": scheduled_at_str,
                     "can_start": can_start,
-                    "face_verified": candidate.candidate_profile.face_verified if candidate and candidate.candidate_profile else False,
-                    "voice_verified": candidate.candidate_profile.voice_verified if candidate and candidate.candidate_profile else False,
+                    "face_verified": face_verified,
+                    "voice_verified": voice_verified,
                 }
 
             if interview_status == InterviewStatus.IN_PROGRESS:
                 # Get the active session if one exists
                 active_session = next((s for s in interview.sessions if s.status == "active"), None)
                 session_id = str(active_session.id) if active_session else None
+                scheduled_at_str = interview.scheduled_at.isoformat() if interview.scheduled_at else None
                 return {
                     "interview_id": str(interview_id),
                     "session_id": session_id,
                     "status": interview_status.value,
-                    "scheduled_at": interview.scheduled_at,
+                    "scheduled_at": scheduled_at_str,
                     "can_start": True,
+                    "face_verified": True,  # Already verified if in progress
+                    "voice_verified": True,
                 }
             
             return None
@@ -138,6 +146,40 @@ class InterviewSQLService:
                 status="active"
             )
             uow.interviews.create_session(new_session)
+            
+            # Create InterviewSessionQuestion records from curated_questions
+            if interview.curated_questions and 'questions' in interview.curated_questions:
+                from app.db.sql.models.interview_session_question import InterviewSessionQuestion
+                from app.db.sql.models.question import Question
+                
+                questions_list = interview.curated_questions['questions']
+                for idx, q_data in enumerate(questions_list, 1):
+                    question_id = None
+                    custom_text = None
+                    
+                    # Check if this is a question from the question bank
+                    if 'question_id' in q_data and q_data['question_id'].startswith('conv_') == False:
+                        try:
+                            question_id = uuid.UUID(q_data['question_id'])
+                            # Verify the question exists
+                            question = await uow.session.get(Question, question_id)
+                            if not question:
+                                question_id = None
+                        except (ValueError, TypeError):
+                            question_id = None
+                    
+                    # If not from question bank, use custom text
+                    if not question_id:
+                        custom_text = q_data.get('prompt') or q_data.get('question_text') or q_data.get('text', '')
+                    
+                    session_question = InterviewSessionQuestion(
+                        id=uuid.uuid4(),
+                        interview_id=interview_id,
+                        question_id=question_id,
+                        custom_text=custom_text,
+                        order=q_data.get('order', idx)
+                    )
+                    uow.session.add(session_question)
             
             # Automatically committed by the context wrapper closing
             await uow.flush() # Needed so we can return the ID

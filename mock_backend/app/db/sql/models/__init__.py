@@ -4,6 +4,7 @@ from app.db.sql.models.interview_template import InterviewTemplate, TemplateQues
 from app.db.sql.models.interview import Interview
 from app.db.sql.models.interview_session import InterviewSession
 from app.db.sql.models.interview_session_question import InterviewSessionQuestion
+from app.db.sql.models.interview_response import InterviewResponse
 from app.db.sql.models.question import Question, DifficultyEnum, CategoryEnum
 
 __all__ = [
@@ -16,6 +17,7 @@ __all__ = [
     "Interview",
     "InterviewSession",
     "InterviewSessionQuestion",
+    "InterviewResponse",
     "Question",
     "DifficultyEnum",
     "CategoryEnum",

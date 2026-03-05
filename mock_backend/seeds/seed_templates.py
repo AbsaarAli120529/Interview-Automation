@@ -2,6 +2,7 @@ import logging
 from sqlalchemy import select, literal
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.sql.models.interview_template import InterviewTemplate, TemplateQuestion
+from app.db.sql.models.question import Question, CategoryEnum, DifficultyEnum
 
 logger = logging.getLogger(__name__)
 
@@ -55,28 +56,60 @@ async def seed_templates(session: AsyncSession):
     session.add(template)
     await session.flush() # Get template ID
 
-    questions = [
-        TemplateQuestion(
-            template_id=template.id,
-            question_text="Explain a machine learning project you worked on.",
-            question_type="CONVERSATIONAL",
-            time_limit_sec=120,
-            order=1,
-        ),
-        TemplateQuestion(
-            template_id=template.id,
-            question_text="Write a SQL query to find the second highest salary.",
-            question_type="CODING",
-            time_limit_sec=300,
-            order=2,
-        ),
-        TemplateQuestion(
-            template_id=template.id,
-            question_text="How do you handle model overfitting?",
-            question_type="CONVERSATIONAL",
-            time_limit_sec=120,
-            order=3,
-        ),
+    # Create Question objects first
+    question_data = [
+        {
+            "text": "Explain a machine learning project you worked on.",
+            "category": CategoryEnum.MACHINE_LEARNING,
+            "difficulty": DifficultyEnum.MEDIUM,
+            "question_type": "CONVERSATIONAL",
+            "time_limit_sec": 120,
+            "order": 1,
+        },
+        {
+            "text": "Write a SQL query to find the second highest salary.",
+            "category": CategoryEnum.SQL,
+            "difficulty": DifficultyEnum.MEDIUM,
+            "question_type": "CODING",
+            "time_limit_sec": 300,
+            "order": 2,
+        },
+        {
+            "text": "How do you handle model overfitting?",
+            "category": CategoryEnum.MACHINE_LEARNING,
+            "difficulty": DifficultyEnum.MEDIUM,
+            "question_type": "CONVERSATIONAL",
+            "time_limit_sec": 120,
+            "order": 3,
+        },
     ]
-    session.add_all(questions)
+    
+    questions = []
+    template_questions = []
+    
+    for q_data in question_data:
+        # Create Question object
+        question = Question(
+            text=q_data["text"],
+            category=q_data["category"],
+            difficulty=q_data["difficulty"],
+            is_active=True,
+        )
+        session.add(question)
+        questions.append(question)
+    
+    await session.flush()  # Flush to get question IDs
+    
+    # Create TemplateQuestion objects that reference the Question objects
+    for i, q_data in enumerate(question_data):
+        template_question = TemplateQuestion(
+            template_id=template.id,
+            question_id=questions[i].id,
+            question_type=q_data["question_type"],
+            time_limit_sec=q_data["time_limit_sec"],
+            order=q_data["order"],
+        )
+        template_questions.append(template_question)
+    
+    session.add_all(template_questions)
     logger.info("[OK] Default template created successfully.")

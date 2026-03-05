@@ -153,7 +153,15 @@ export default function AdminDashboardPage() {
         setStatsLoading(true);
         try {
             const baseUrl = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8000';
-            const res = await fetch(`${baseUrl}/api/v1/dashboard/stats`);
+            const currentToken = useAuthStore.getState().token;
+            const authHeader: Record<string, string> = currentToken ? { 'Authorization': `Bearer ${currentToken}` } : {};
+            
+            const res = await fetch(`${baseUrl}/api/v1/dashboard/stats`, {
+                headers: {
+                    ...authHeader,
+                    'Content-Type': 'application/json'
+                }
+            });
             if (res.ok) {
                 setStats(await res.json());
             } else {
@@ -161,6 +169,7 @@ export default function AdminDashboardPage() {
             }
         } catch (err) {
             console.error(err);
+            setStats({ total_interviews: 0, completed: 0, pending: 0, flagged: 0 });
         } finally {
             setStatsLoading(false);
         }

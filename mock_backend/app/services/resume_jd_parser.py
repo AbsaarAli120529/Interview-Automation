@@ -1,15 +1,17 @@
 """
 Resume and Job Description Parser Service
 ------------------------------------------
-Parses resume PDFs and job descriptions to extract relevant information
-for question generation.
+Parses resume PDFs and job descriptions using Azure OpenAI LLM
+to extract relevant information for question generation.
 """
 
 import os
+import json
 import logging
 from typing import Dict, Any, Optional
 import pypdf
 import io
+from app.services.azure_openai_service import azure_openai_service
 
 logger = logging.getLogger(__name__)
 
@@ -96,7 +98,7 @@ class ResumeJDParser:
     @staticmethod
     def parse_job_description(jd_text: str) -> Dict[str, Any]:
         """
-        Parse a job description text.
+        Parse a job description text using Azure OpenAI LLM.
         
         Args:
             jd_text: Job description text
@@ -107,12 +109,72 @@ class ResumeJDParser:
             - required_skills: List of required skills
             - responsibilities: List of responsibilities
             - requirements: List of requirements
+            - experience_required: Years of experience required
+            - education_required: Education requirements
+            - job_title: Job title
+            - location: Job location
         """
+        if not azure_openai_service.client:
+            logger.warning("Azure OpenAI not configured, using fallback parsing")
+            return ResumeJDParser._fallback_parse_jd(jd_text)
+        
+        try:
+            system_prompt = """You are an expert job description parser. Extract structured information from the job description.
+Return ONLY valid JSON with this exact structure:
+{
+    "job_title": "Job Title",
+    "location": "Location if mentioned",
+    "required_skills": ["skill1", "skill2", ...],
+    "responsibilities": ["responsibility1", "responsibility2", ...],
+    "requirements": ["requirement1", "requirement2", ...],
+    "experience_required": <number of years>,
+    "education_required": ["degree1", "degree2"],
+    "preferred_qualifications": ["qual1", "qual2"],
+    "technologies": ["tech1", "tech2"],
+    "industry": "Industry if mentioned"
+}"""
+
+            user_prompt = f"""Parse the following job description and extract all relevant information:
+
+{jd_text[:8000]}
+
+Return ONLY the JSON object, no additional text or markdown."""
+
+            response = azure_openai_service.client.chat.completions.create(
+                model="gpt-4o",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ],
+                temperature=0.1,
+                max_tokens=2000,
+                response_format={"type": "json_object"}
+            )
+            
+            parsed_json = json.loads(response.choices[0].message.content)
+            parsed_json['text'] = jd_text  # Keep original text
+            logger.info("Successfully parsed JD with LLM")
+            return parsed_json
+            
+        except Exception as e:
+            logger.error(f"Error parsing JD with LLM: {e}")
+            return ResumeJDParser._fallback_parse_jd(jd_text)
+    
+    @staticmethod
+    def _fallback_parse_jd(jd_text: str) -> Dict[str, Any]:
+        """Fallback JD parsing when LLM is not available."""
         return {
             'text': jd_text,
+            'job_title': '',
+            'location': '',
             'required_skills': ResumeJDParser._extract_skills(jd_text),
             'responsibilities': ResumeJDParser._extract_sections(jd_text, ['responsibilities', 'duties', 'what you will']),
-            'requirements': ResumeJDParser._extract_sections(jd_text, ['requirements', 'qualifications', 'must have'])
+            'requirements': ResumeJDParser._extract_sections(jd_text, ['requirements', 'qualifications', 'must have']),
+            'experience_required': None,
+            'education_required': [],
+            'preferred_qualifications': [],
+            'technologies': [],
+            'industry': ''
         }
     
     @staticmethod

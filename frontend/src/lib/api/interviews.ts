@@ -167,12 +167,25 @@ export interface ActiveInterviewResponse {
 }
 
 export async function fetchActiveInterview(): Promise<ActiveInterviewResponse | null> {
-    const res = await fetch(`${BASE_URL}/api/v1/candidate/interviews/active`, {
-        headers: authHeaders(),
-    });
-    if (!res.ok) throw await parseError(res);
-    const data = await res.json();
-    return data ?? null;
+    try {
+        const res = await fetch(`${BASE_URL}/api/v1/candidate/interviews/active`, {
+            headers: authHeaders(),
+        });
+        if (res.status === 404) return null;  // No interview found is OK
+        if (!res.ok) throw await parseError(res);
+        const data = await res.json();
+        // Handle null response from backend
+        if (data === null || (typeof data === 'object' && Object.keys(data).length === 0)) {
+            return null;
+        }
+        return data;
+    } catch (error) {
+        // Network errors or other fetch errors
+        if (error instanceof TypeError && error.message.includes('fetch')) {
+            throw { status: 0, detail: 'Failed to connect to server. Please check your connection.' } as SchedulingApiError;
+        }
+        throw error;
+    }
 }
 
 // ─── Candidate: start interview ───────────────────────────────────────────────

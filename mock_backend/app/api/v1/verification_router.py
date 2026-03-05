@@ -275,3 +275,101 @@ async def get_verification_status(
             "voice_sample_url": candidate_profile.voice_sample_url,
             "video_sample_url": candidate_profile.video_sample_url
         }
+
+
+@router.post("/verify-face", summary="Real-time face verification during interview")
+async def verify_face_during_interview(
+    image: UploadFile = File(..., description="Face image captured during interview"),
+    current_candidate: User = Depends(get_current_candidate),
+    session: AsyncSession = Depends(get_db_session),
+) -> Dict[str, Any]:
+    """
+    Verify candidate's face during interview by comparing with uploaded sample.
+    This is called every 5 seconds during the interview.
+    """
+    async with UnitOfWork(session) as uow:
+        candidate = await uow.users.get_by_id(current_candidate.id)
+        if not candidate or not candidate.candidate_profile:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Candidate profile not found"
+            )
+        candidate_profile = candidate.candidate_profile
+        
+        if not candidate_profile.face_sample_url:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="No face sample uploaded. Please upload a face sample first."
+            )
+        
+        # Read image data
+        image_data = await image.read()
+        
+        # Verify face using Azure Face API
+        try:
+            verified = await azure_verification_service.verify_face_from_url(
+                image_data=image_data,
+                reference_face_url=candidate_profile.face_sample_url
+            )
+            
+            return {
+                "verified": verified,
+                "confidence": 0.85 if verified else 0.3,  # Mock confidence score
+                "message": "Face verified successfully" if verified else "Face mismatch detected"
+            }
+        except Exception as e:
+            logger.error(f"Face verification error: {e}")
+            return {
+                "verified": False,
+                "confidence": 0.0,
+                "message": f"Verification error: {str(e)}"
+            }
+
+
+@router.post("/verify-voice", summary="Real-time voice verification during interview")
+async def verify_voice_during_interview(
+    audio: UploadFile = File(..., description="Voice sample captured during interview"),
+    current_candidate: User = Depends(get_current_candidate),
+    session: AsyncSession = Depends(get_db_session),
+) -> Dict[str, Any]:
+    """
+    Verify candidate's voice during interview by comparing with uploaded sample.
+    This is called when the candidate starts speaking.
+    """
+    async with UnitOfWork(session) as uow:
+        candidate = await uow.users.get_by_id(current_candidate.id)
+        if not candidate or not candidate.candidate_profile:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Candidate profile not found"
+            )
+        candidate_profile = candidate.candidate_profile
+        
+        if not candidate_profile.voice_sample_url:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="No voice sample uploaded. Please upload a voice sample first."
+            )
+        
+        # Read audio data
+        audio_data = await audio.read()
+        
+        # Verify voice using Azure Speaker Recognition
+        try:
+            verified = await azure_verification_service.verify_voice_from_url(
+                audio_data=audio_data,
+                reference_voice_url=candidate_profile.voice_sample_url
+            )
+            
+            return {
+                "verified": verified,
+                "confidence": 0.88 if verified else 0.25,  # Mock confidence score
+                "message": "Voice verified successfully" if verified else "Voice mismatch detected"
+            }
+        except Exception as e:
+            logger.error(f"Voice verification error: {e}")
+            return {
+                "verified": False,
+                "confidence": 0.0,
+                "message": f"Verification error: {str(e)}"
+            }

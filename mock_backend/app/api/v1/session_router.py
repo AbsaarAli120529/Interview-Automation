@@ -63,8 +63,15 @@ async def proctoring_ws(websocket: WebSocket):
     """
     Simple proctoring / control WebSocket.
     """
-    await websocket.accept()
+    try:
+        await websocket.accept()
+        logger.info("[proctoring_ws] WebSocket connection accepted")
+    except Exception as e:
+        logger.error(f"[proctoring_ws] Failed to accept WebSocket: {e}")
+        return
+    
     session_validated = False
+    candidate_id = None
 
     try:
         while True:
@@ -79,16 +86,28 @@ async def proctoring_ws(websocket: WebSocket):
 
             if msg_type == "HANDSHAKE":
                 session_id_str = msg.get("interview_id", "")
+                candidate_token = msg.get("candidate_token", "")
                 
                 try:
                     session_id = uuid.UUID(session_id_str)
                     
                     # Manual short-lived transaction for WebSocket
                     async with AsyncSessionLocal() as session:
-                        await InterviewSessionSQLService.validate_session(session, session_id)
+                        # Try to validate without candidate_id first (for backward compatibility)
+                        try:
+                            validation_result = await InterviewSessionSQLService.validate_session(session, session_id)
+                            candidate_id = uuid.UUID(validation_result.get("candidate_id", ""))
+                            session_validated = True
+                            logger.info(f"[proctoring_ws] Session validated: {session_id}")
+                        except HTTPException as e:
+                            logger.warning(f"[proctoring_ws] Session validation failed: {e.detail}")
+                            session_validated = False
+                        except Exception as e:
+                            logger.error(f"[proctoring_ws] Error validating session: {e}")
+                            session_validated = False
                         
-                    session_validated = True
-                except (ValueError, HTTPException):
+                except (ValueError, TypeError) as e:
+                    logger.warning(f"[proctoring_ws] Invalid session_id format: {session_id_str}, error: {e}")
                     session_validated = False
 
                 if session_validated:
@@ -96,21 +115,33 @@ async def proctoring_ws(websocket: WebSocket):
                         "type": "HANDSHAKE_ACK",
                         "heartbeat_interval_sec": 30,
                     }))
+                    logger.info("[proctoring_ws] HANDSHAKE_ACK sent")
                 else:
-                    await websocket.send_text(json.dumps({
+                    error_msg = json.dumps({
                         "type": "ERROR",
-                        "detail": "Invalid session",
-                    }))
+                        "detail": "Invalid session or session not found",
+                    })
+                    await websocket.send_text(error_msg)
                     await websocket.close(code=1008, reason="Invalid session")
+                    logger.warning(f"[proctoring_ws] Closing connection due to invalid session: {session_id_str}")
                     return
 
             elif msg_type == "HEARTBEAT":
-                await websocket.send_text(json.dumps({"type": "HEARTBEAT_ACK"}))
+                if session_validated:
+                    await websocket.send_text(json.dumps({"type": "HEARTBEAT_ACK"}))
+                else:
+                    # If not validated, close connection
+                    await websocket.close(code=1008, reason="Session not validated")
+                    return
 
     except WebSocketDisconnect:
-        logger.info("[proctoring_ws] Client disconnected")
+        logger.info("[proctoring_ws] Client disconnected normally")
     except Exception as exc:
-        logger.error("[proctoring_ws] Unexpected error: %s", exc)
+        logger.error(f"[proctoring_ws] Unexpected error: {exc}", exc_info=True)
+        try:
+            await websocket.close(code=1011, reason="Internal server error")
+        except:
+            pass
 
 
 @router.websocket("/proctoring/media/ws")
@@ -127,32 +158,176 @@ async def proctoring_media_ws(websocket: WebSocket):
 
 @router.websocket("/answer/ws")
 async def answer_ws(websocket: WebSocket):
-    await websocket.accept()
+    """
+    WebSocket endpoint for real-time audio transcription during interview.
+    Receives audio chunks and returns live transcription using Azure Speech-to-Text.
+    """
+    try:
+        await websocket.accept()
+        logger.info("[answer_ws] WebSocket connection accepted")
+    except Exception as e:
+        logger.error(f"[answer_ws] Failed to accept WebSocket: {e}")
+        return
+    
     transcript_id = str(uuid.uuid4())
+    partial_text = ""
+    recognition_session = None
     
     try:
+        # Wait for START_ANSWER message
+        start_msg = await websocket.receive_text()
+        start_data = json.loads(start_msg)
+        if start_data.get("type") != "START_ANSWER":
+            await websocket.close(code=1008, reason="Expected START_ANSWER message")
+            return
+        
+        question_id = start_data.get("question_id")
+        logger.info(f"[answer_ws] Starting transcription for question {question_id}")
+        
+        # Create recognition session for real-time transcription
+        from app.services.azure_speech_service import azure_speech_service
+        
+        # Get the current event loop for scheduling async tasks
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = asyncio.get_event_loop()
+        
+        # Create callbacks that will be called from Azure Speech SDK (synchronous context)
+        # We'll use asyncio.run_coroutine_threadsafe to schedule the async websocket send
+        def send_partial(text: str):
+            """Send partial transcription to client (called from Azure SDK thread)."""
+            nonlocal partial_text
+            partial_text = text
+            # Print transcript to terminal (flush immediately)
+            print(f"\n[STT PARTIAL] {text}", flush=True)
+            logger.info(f"[STT] Partial transcript: {text}")
+            try:
+                # Schedule async send in the event loop
+                asyncio.run_coroutine_threadsafe(
+                    websocket.send_text(json.dumps({
+                        "type": "TRANSCRIPT_PARTIAL",
+                        "text": text
+                    })),
+                    loop
+                )
+            except Exception as e:
+                logger.error(f"[answer_ws] Error sending partial transcript: {e}")
+        
+        def send_final(text: str):
+            """Send final transcription to client (called from Azure SDK thread)."""
+            nonlocal partial_text
+            partial_text = text
+            # Print transcript to terminal (flush immediately)
+            print(f"\n[STT FINAL] {text}", flush=True)
+            logger.info(f"[STT] Final transcript: {text}")
+            try:
+                # Schedule async send in the event loop
+                asyncio.run_coroutine_threadsafe(
+                    websocket.send_text(json.dumps({
+                        "type": "TRANSCRIPT_FINAL",
+                        "text": text
+                    })),
+                    loop
+                )
+            except Exception as e:
+                logger.error(f"[answer_ws] Error sending final transcript: {e}")
+        
+        # Check if Azure STT is initialized
+        is_azure_mode = azure_speech_service._initialized
+        print(f"\n[STT STATUS] Azure Speech Service: {'INITIALIZED' if is_azure_mode else 'MOCK MODE'}", flush=True)
+        logger.info(f"[STT] Azure Speech Service initialized: {is_azure_mode}")
+        
+        # Create recognition session
+        recognition_session = azure_speech_service.create_recognition_session(
+            session_id=transcript_id,
+            on_partial_result=send_partial,
+            on_final_result=send_final,
+        )
+        
+        print(f"[STT] Recognition session created: {transcript_id}", flush=True)
+        logger.info(f"[STT] Recognition session created: {transcript_id}")
+        
+        # Send acknowledgment
+        await websocket.send_text(json.dumps({
+            "type": "STARTED",
+            "message": "Ready to receive audio"
+        }))
+        
         while True:
-            message = await websocket.receive()
+            try:
+                message = await websocket.receive()
+            except WebSocketDisconnect:
+                logger.info("[answer_ws] Client disconnected")
+                break
+            
+            if "bytes" in message:
+                # Audio data received - push to recognition session
+                audio_chunk = message["bytes"]
+                # Log first chunk and every 50th chunk to avoid spam
+                if not hasattr(send_partial, '_chunk_count'):
+                    send_partial._chunk_count = 0
+                send_partial._chunk_count += 1
+                if send_partial._chunk_count == 1 or send_partial._chunk_count % 50 == 0:
+                    print(f"[STT] Received audio chunk #{send_partial._chunk_count}: {len(audio_chunk)} bytes", flush=True)
+                if recognition_session:
+                    recognition_session.push_audio(audio_chunk)
+                else:
+                    logger.warning("[STT] No recognition session available to process audio")
+                    print("[STT ERROR] No recognition session available!", flush=True)
+            
             if "text" in message:
                 try:
                     data = json.loads(message["text"])
                     if data.get("type") == "END_ANSWER":
-                        await websocket.send_text(json.dumps({
-                            "type": "TRANSCRIPT_FINAL", 
-                            "text": "This is a mock transcript of the candidate's answer."
-                        }))
-                        await websocket.send_text(json.dumps({
-                            "type": "ANSWER_READY", 
-                            "transcript_id": transcript_id
-                        }))
-                        await websocket.close()
+                        # Stop recognition session and get final transcript
+                        final_text = partial_text.strip() if partial_text else ""
+                        
+                        if recognition_session:
+                            try:
+                                await recognition_session.stop()
+                                session_final = recognition_session.get_final_transcript()
+                                if session_final and session_final.strip():
+                                    final_text = session_final
+                            except Exception as e:
+                                logger.error(f"[answer_ws] Error stopping recognition session: {e}")
+                        
+                        # Ensure we have a final transcript
+                        if not final_text or not final_text.strip():
+                            final_text = partial_text.strip() if partial_text else "No speech detected."
+                        
+                        try:
+                            await websocket.send_text(json.dumps({
+                                "type": "TRANSCRIPT_FINAL", 
+                                "text": final_text
+                            }))
+                            await websocket.send_text(json.dumps({
+                                "type": "ANSWER_READY", 
+                                "transcript_id": final_text  # Use transcript text as ID
+                            }))
+                        except Exception as e:
+                            logger.error(f"[answer_ws] Error sending final transcript: {e}")
+                        await websocket.close(code=1000)
                         return
                 except json.JSONDecodeError:
                     pass
+                    
     except WebSocketDisconnect:
-        pass
+        logger.info("[answer_ws] Client disconnected normally")
     except Exception as exc:
-        logger.error("[answer_ws] Unexpected error: %s", exc)
+        logger.error(f"[answer_ws] Unexpected error: {exc}", exc_info=True)
+        try:
+            await websocket.close(code=1011, reason="Internal server error")
+        except:
+            pass
+    finally:
+        # Clean up recognition session
+        if recognition_session:
+            try:
+                await recognition_session.stop()
+                azure_speech_service.remove_recognition_session(transcript_id)
+            except Exception as e:
+                logger.error(f"[answer_ws] Error cleaning up recognition session: {e}")
 
 
 # ─── REST endpoints ────────────────────────────────────────────────────────────
