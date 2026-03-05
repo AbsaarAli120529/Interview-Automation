@@ -37,7 +37,11 @@ class Question(Base):
     created_at: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
     question_type: Mapped[QuestionType] = mapped_column(
-        SQLEnum(QuestionType),
+        SQLEnum(
+            QuestionType,
+            name="questiontype",
+            values_callable=lambda x: [e.value for e in x]
+        ),
         nullable=False,
         server_default="technical"
     )

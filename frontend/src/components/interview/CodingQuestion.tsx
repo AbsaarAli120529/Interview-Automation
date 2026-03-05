@@ -1,8 +1,8 @@
 import React, { useEffect } from "react"
 import { useCodingStore } from "@/store/codingStore"
-import ProblemPanel from "./ProblemPanel"
-import CodeEditorPanel from "./CodeEditorPanel"
-import ResultsPanel from "./ResultsPanel"
+import ProblemPanel from "@/components/coding/ProblemPanel"
+import CodeEditorPanel from "@/components/coding/CodeEditorPanel"
+import ResultsPanel from "@/components/coding/ResultsPanel"
 
 interface CodingQuestionProps {
     question: any
