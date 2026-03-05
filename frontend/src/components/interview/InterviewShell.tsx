@@ -4,6 +4,7 @@ import { useState, useEffect, useRef } from "react";
 import { useInterviewStore } from "@/store/interviewStore";
 import QuestionPanel from "./QuestionPanel";
 import AnswerPanel from "./AnswerPanel";
+import CodingQuestion from "./CodingQuestion";
 import Timer from "./Timer";
 import VideoFeed from "./VideoFeed";
 import { useProctoring } from "@/hooks/useProctoring";
@@ -97,7 +98,7 @@ export default function InterviewShell() {
                                 videoElement.onerror = reject;
                                 setTimeout(reject, 2000); // Timeout after 2 seconds
                             });
-                            
+
                             const canvas = document.createElement("canvas");
                             canvas.width = videoElement.videoWidth || 640;
                             canvas.height = videoElement.videoHeight || 480;
@@ -118,14 +119,14 @@ export default function InterviewShell() {
                         setFaceVerificationStatus("failed");
                         return;
                     }
-                    
+
                     // Convert bitmap to blob
                     const canvas = document.createElement("canvas");
                     canvas.width = bitmap.width;
                     canvas.height = bitmap.height;
                     const ctx = canvas.getContext("2d");
                     if (!ctx) return;
-                    
+
                     ctx.drawImage(bitmap, 0, 0);
                     canvas.toBlob(async (blob) => {
                         if (!blob) {
@@ -133,15 +134,15 @@ export default function InterviewShell() {
                             setFaceVerificationStatus("failed");
                             return;
                         }
-                        
+
                         const formData = new FormData();
                         formData.append("image", blob, "face_verification.jpg");
-                        
+
                         try {
-                            const token = localStorage.getItem("auth-storage") 
-                                ? JSON.parse(localStorage.getItem("auth-storage") || "{}")?.state?.token 
+                            const token = localStorage.getItem("auth-storage")
+                                ? JSON.parse(localStorage.getItem("auth-storage") || "{}")?.state?.token
                                 : null;
-                            
+
                             const response = await fetch(`${process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000"}/api/v1/verification/verify-face`, {
                                 method: "POST",
                                 headers: token ? {
@@ -149,7 +150,7 @@ export default function InterviewShell() {
                                 } : {},
                                 body: formData,
                             });
-                            
+
                             if (response.ok) {
                                 const data = await response.json();
                                 if (data.verified) {
@@ -192,31 +193,31 @@ export default function InterviewShell() {
     // Proctoring: disable copy/paste, detect tab switching
     useProctoring({
         onTabSwitch: async () => {
-                            setProctoringAlerts(prev => {
-                                const newCount = prev + 1;
-                                if (newCount >= 5) {
-                                    // Auto-submit interview after 5 alerts
-                                    if (interviewId && currentQuestion) {
-                                        apiClient.post("/api/v1/proctoring/event", {
-                                            event_type: "TAB_SWITCH",
-                                            details: "Multiple tab switches detected",
-                                        }, true).then(() => {
-                                            submitAnswer({
-                                                question_id: currentQuestion.question_id,
-                                                answer_type: currentQuestion.answer_mode,
-                                                answer_payload: answerPayload,
-                                            });
-                                        }).catch(console.error);
-                                    }
-                                }
-                                return newCount;
+            setProctoringAlerts(prev => {
+                const newCount = prev + 1;
+                if (newCount >= 5) {
+                    // Auto-submit interview after 5 alerts
+                    if (interviewId && currentQuestion) {
+                        apiClient.post("/api/v1/proctoring/event", {
+                            event_type: "TAB_SWITCH",
+                            details: "Multiple tab switches detected",
+                        }, true).then(() => {
+                            submitAnswer({
+                                question_id: currentQuestion.question_id,
+                                answer_type: currentQuestion.answer_mode,
+                                answer_payload: answerPayload,
                             });
-                            if (interviewId) {
-                                await apiClient.post("/api/v1/proctoring/event", {
-                                    event_type: "TAB_SWITCH",
-                                    details: "Tab switch detected",
-                                }, true).catch(console.error);
-                            }
+                        }).catch(console.error);
+                    }
+                }
+                return newCount;
+            });
+            if (interviewId) {
+                await apiClient.post("/api/v1/proctoring/event", {
+                    event_type: "TAB_SWITCH",
+                    details: "Tab switch detected",
+                }, true).catch(console.error);
+            }
         },
         onCopy: async () => {
             setProctoringAlerts(prev => prev + 1);
@@ -259,12 +260,12 @@ export default function InterviewShell() {
             {/* Left Sidebar - Video Feed */}
             <div className="w-80 bg-white border-r border-gray-200 p-4 flex flex-col">
                 <h3 className="text-sm font-semibold text-gray-700 mb-2">Live Video</h3>
-                <VideoFeed 
+                <VideoFeed
                     onStreamReady={(stream) => {
                         videoStreamRef.current = stream;
                     }}
                 />
-                
+
                 {/* Face Verification Status */}
                 <div className="mt-4 p-3 rounded-lg bg-gray-50">
                     <div className="flex items-center justify-between mb-2">
@@ -296,31 +297,35 @@ export default function InterviewShell() {
                             <Timer durationSec={currentQuestion.time_limit_sec} onExpire={handleSubmit} />
                         </div>
 
-                        <QuestionPanel question={currentQuestion} />
+                        {currentQuestion.type === "coding" ? (
+                            <CodingQuestion question={currentQuestion} />
+                        ) : (
+                            <>
+                                <QuestionPanel question={currentQuestion} />
 
-                        <AnswerPanel
-                            mode={currentQuestion.answer_mode}
-                            value={answerPayload}
-                            onChange={setAnswerPayload}
-                            questionId={currentQuestion.question_id}
-                            onVoiceStart={async () => {
-                                // Voice verification will be handled by the AnswerPanel's audio stream
-                                // The audio stream from AnswerPanel will be used for verification
-                                // No need to use video stream's audio track here to avoid conflicts
-                            }}
-                        />
+                                <AnswerPanel
+                                    mode={currentQuestion.answer_mode}
+                                    value={answerPayload}
+                                    onChange={setAnswerPayload}
+                                    questionId={currentQuestion.question_id}
+                                    onVoiceStart={async () => {
+                                        // Voice verification will be handled by the AnswerPanel's audio stream
+                                    }}
+                                />
 
-                        <button
-                            onClick={handleSubmit}
-                            disabled={
-                                isSubmitting ||
-                                !answerPayload ||
-                                !answerPayload.trim()
-                            }
-                            className="mt-4 px-6 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed self-end transition-colors"
-                        >
-                            {isSubmitting ? "Submitting..." : "Submit Answer"}
-                        </button>
+                                <button
+                                    onClick={handleSubmit}
+                                    disabled={
+                                        isSubmitting ||
+                                        !answerPayload ||
+                                        !answerPayload.trim()
+                                    }
+                                    className="mt-4 px-6 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed self-end transition-colors"
+                                >
+                                    {isSubmitting ? "Submitting..." : "Submit Answer"}
+                                </button>
+                            </>
+                        )}
                     </div>
                 </div>
             </div>
