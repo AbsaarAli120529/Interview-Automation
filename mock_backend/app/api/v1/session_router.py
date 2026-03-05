@@ -366,6 +366,54 @@ async def question_next(
     return await InterviewSessionSQLService.get_session_state(session, session_id, candidate_id)
 
 
+@router.get("/candidate/interview/sections")
+async def list_sections(
+    x_interview_id: Optional[str] = Header(None, alias="X-Interview-Id"),
+    current_user: User = Depends(_get_current_candidate),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Get all sections for the current interview session."""
+    if not x_interview_id:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="X-Interview-Id header is required")
+
+    session_id = validate_uuid(x_interview_id)
+    return await InterviewSessionSQLService.get_sections(session, session_id, current_user.id)
+
+
+from pydantic import BaseModel
+from typing import Optional
+
+class StartSectionRequest(BaseModel):
+    section_id: Optional[str] = None
+    section_type: Optional[str] = None
+
+@router.post("/candidate/interview/start-section")
+async def start_section(
+    payload: StartSectionRequest,
+    x_interview_id: Optional[str] = Header(None, alias="X-Interview-Id"),
+    current_user: User = Depends(_get_current_candidate),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Start a specific section, making it the active section."""
+    if not x_interview_id:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="X-Interview-Id header is required")
+
+    session_id = validate_uuid(x_interview_id)
+
+    if payload.section_id:
+        section_id_uuid = validate_uuid(payload.section_id)
+    elif payload.section_type:
+        sections = await InterviewSessionSQLService.get_sections(session, session_id, current_user.id)
+        section = next((s for s in sections if s["section_type"] == payload.section_type), None)
+        if not section:
+            raise HTTPException(status_code=404, detail="Section type not found")
+        section_id_uuid = validate_uuid(section["id"])
+    else:
+        raise HTTPException(status_code=400, detail="Must provide section_id or section_type")
+    
+    return await InterviewSessionSQLService.start_section(session, session_id, section_id_uuid, current_user.id)
+
+
 @router.post("/submit/submit")
 async def submit_answer(
     payload: dict,

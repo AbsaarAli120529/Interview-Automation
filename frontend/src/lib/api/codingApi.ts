@@ -1,5 +1,6 @@
 export interface CodingProblem {
     id: string
+    session_question_id?: string
     title: string
     description: string
     difficulty: string
@@ -29,10 +30,12 @@ export interface CodeSubmitResponse {
     passed: number
     total: number
     results: TestCaseResult[]
+    state?: string
 }
 
 export async function runCode(payload: {
     problem_id: string
+    session_question_id?: string
     language: string
     source_code: string
     interview_id?: string
@@ -52,6 +55,7 @@ export async function runCode(payload: {
 
 export async function submitCode(payload: {
     problem_id: string
+    session_question_id?: string
     language: string
     source_code: string
     interview_id?: string

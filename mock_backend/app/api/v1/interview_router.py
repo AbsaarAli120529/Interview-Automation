@@ -11,6 +11,11 @@ from fastapi import APIRouter, Depends, status, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import List
 
+from sqlalchemy import select, func
+from app.db.sql.models.interview_template import InterviewTemplate
+from app.db.sql.models.coding_problem import CodingProblem
+from app.db.sql.models.question import Question
+
 from app.api.v1.auth_router import get_current_admin
 from app.db.sql.session import get_db_session
 from app.db.sql.models.user import User
@@ -62,18 +67,102 @@ async def preview_template(
     session: AsyncSession = Depends(get_db_session),
 ):
     validated_id = validate_uuid(template_id)
-    questions = await template_engine.generate_questions_from_template(validated_id, session)
-    
+    template = await session.get(InterviewTemplate, validated_id)
+    if not template:
+        raise HTTPException(status_code=404, detail="Template not found")
+
+    # 1. Technical Preview — always use technical_config; fall back to legacy settings
+    technical_questions_res = []
+    distribution = None
+    if template.technical_config and isinstance(template.technical_config, dict):
+        # Support both flat map {"easy": 2} and nested {"difficulty_distribution": {"easy": 2}}
+        if any(k.lower() in ["easy", "medium", "hard"] for k in template.technical_config.keys()):
+            distribution = template.technical_config
+        else:
+            distribution = template.technical_config.get("difficulty_distribution")
+
+    if not distribution and template.settings and isinstance(template.settings, dict):
+        distribution = template.settings.get("difficulty_distribution")
+
+    if distribution and isinstance(distribution, dict):
+        from app.db.sql.models.question import DifficultyEnum
+        for diff_str, count in distribution.items():
+            if not isinstance(count, int) or count <= 0:
+                continue
+            
+            try:
+                # Resolve enum in Python to avoid database-side cast issues with native enums
+                target_diff = DifficultyEnum(diff_str.upper())
+                
+                query = select(Question).where(
+                    Question.difficulty == target_diff,
+                    Question.is_active == True
+                ).order_by(func.random()).limit(count)
+                
+                res = await session.execute(query)
+                technical_questions_res.extend(res.scalars().all())
+            except (ValueError, Exception) as e:
+                # If one difficulty fails (e.g. invalid key or DB error), 
+                # we log and continue to next section without crashing the whole preview.
+                # However, if it's a DB error, the transaction might be failed.
+                # We're in a simple GET, so we just log.
+                import logging
+                logging.getLogger(__name__).warning(f"Technical preview loop error for {diff_str}: {e}")
+                continue
+
+    technical_preview = [
+        {
+            "question_id": q.id,
+            "text": q.text,
+            "difficulty": q.difficulty,
+            "category": q.category,
+        }
+        for q in technical_questions_res
+    ]
+
+    # 2. Coding Preview
+    coding_preview = []
+    coding_config = template.coding_config or {}
+    if isinstance(coding_config, dict):
+        count = coding_config.get("count", 0)
+        difficulties = coding_config.get("difficulty", [])
+        
+        if isinstance(count, int) and count > 0 and isinstance(difficulties, list) and difficulties:
+            # Normalize difficulties to uppercase for comparison
+            valid_diffs = [d.upper() for d in difficulties if isinstance(d, str)]
+            
+            if valid_diffs:
+                try:
+                    query = select(CodingProblem).where(
+                        func.upper(CodingProblem.difficulty).in_(valid_diffs)
+                    ).order_by(func.random()).limit(count)
+                    
+                    res = await session.execute(query)
+                    problems = res.scalars().all()
+                    coding_preview = [
+                        {
+                            "problem_id": p.id,
+                            "title": p.title,
+                            "difficulty": p.difficulty
+                        } for p in problems
+                    ]
+                except Exception as e:
+                    import logging
+                    logging.getLogger(__name__).warning(f"Coding preview error: {e}")
+
+    # 3. Conversational Preview
+    conv_config = template.conversational_config or {}
+    rounds = conv_config.get("rounds", 0) if isinstance(conv_config, dict) else 0
+
+    conversational_preview = {
+        "rounds": rounds if isinstance(rounds, int) else 0,
+        "description": "Conversational interview powered by LLM"
+    }
+
     return {
-        "questions": [
-            {
-                "question_id": q.id,
-                "text": q.text,
-                "difficulty": q.difficulty,
-                "category": q.category,
-            }
-            for q in questions
-        ]
+        "technical_section": {"questions": technical_preview},
+        "coding_section": {"problems": coding_preview},
+        "conversational_section": conversational_preview
     }
 
 

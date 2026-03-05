@@ -27,7 +27,7 @@ class InterviewService {
         apiClient.setInterviewId(this.interviewId);
 
         controlWebSocket.disconnect();
-        
+
         // Add a small delay to ensure session is created before connecting
         setTimeout(() => {
             controlWebSocket.connect({
@@ -87,6 +87,20 @@ class InterviewService {
         }
 
         return response.state;
+    }
+
+    async getSections(): Promise<import("@/types/api").InterviewSection[]> {
+        return apiClient.get<import("@/types/api").InterviewSection[]>("/api/v1/candidate/interview/sections", true);
+    }
+
+    async startSection(sectionType: string): Promise<InterviewState> {
+        const response = await apiClient.post<any, { section_type: string }>(
+            "/api/v1/candidate/interview/start-section",
+            { section_type: sectionType },
+            true
+        );
+        // Do not auto-start proctoring here; let InterviewStore sequence things.
+        return response.state || "IN_PROGRESS";
     }
 
     async fetchNextQuestion(): Promise<QuestionResponse> {

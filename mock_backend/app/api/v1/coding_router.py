@@ -53,6 +53,7 @@ class CodeRunRequest(BaseModel):
     source_code: str
     interview_id: Optional[str] = None
     candidate_id: Optional[str] = None
+    session_question_id: Optional[str] = None
 
 
 class TestCaseResult(BaseModel):
@@ -76,6 +77,7 @@ class SubmitResponse(BaseModel):
     passed: int
     total: int
     results: List[TestCaseResult]
+    state: Optional[str] = "IN_PROGRESS"
 
 
 class ProblemResponse(BaseModel):
@@ -277,14 +279,16 @@ async def submit_code(
 
     pid = _parse_uuid(request.problem_id, "problem_id")
 
-    # Validate optional FK fields
     interview_uuid: Optional[uuid.UUID] = None
     candidate_uuid: Optional[uuid.UUID] = None
+    session_question_uuid: Optional[uuid.UUID] = None
 
     if request.interview_id:
         interview_uuid = _parse_uuid(request.interview_id, "interview_id")
     if request.candidate_id:
         candidate_uuid = _parse_uuid(request.candidate_id, "candidate_id")
+    if request.session_question_id:
+        session_question_uuid = _parse_uuid(request.session_question_id, "session_question_id")
 
     # Verify problem exists
     prob_result = await session.execute(
@@ -349,6 +353,7 @@ async def submit_code(
         problem_id=pid,
         interview_id=interview_uuid,
         candidate_id=candidate_uuid,
+        session_question_id=session_question_uuid,
         language=request.language,
         source_code=request.source_code,
         status=sub_status.value,
@@ -359,6 +364,23 @@ async def submit_code(
     session.add(submission)
     await session.commit()
     await session.refresh(submission)
+
+    session_state = "IN_PROGRESS"
+
+    if interview_uuid and session_question_uuid:
+        from app.services.interview_session_sql_service import InterviewSessionSQLService
+        try:
+            res = await InterviewSessionSQLService.mark_coding_question_answered(
+                session=session,
+                session_id=interview_uuid,
+                session_question_id=session_question_uuid,
+                passed_count=passed_count,
+                total_count=total_count,
+            )
+            if res and "state" in res:
+                session_state = res["state"]
+        except Exception as e:
+            logger.error(f"Failed to mark coding question answered: {e}")
 
     logger.info(
         "Code submission saved: id=%s problem=%s status=%s passed=%d/%d",
@@ -375,4 +397,5 @@ async def submit_code(
         passed=passed_count,
         total=total_count,
         results=results,
+        state=session_state,
     )

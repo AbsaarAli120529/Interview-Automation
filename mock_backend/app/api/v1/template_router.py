@@ -14,7 +14,7 @@ from app.schemas.interview import (
 
 router = APIRouter(prefix="/api/v1/admin/templates", tags=["Admin Templates"])
 
-@router.get("/", response_model=List[InterviewTemplateResponse])
+@router.get("", response_model=List[InterviewTemplateResponse])
 async def list_templates(
     role: Optional[str] = Query(None),
     active_only: Optional[bool] = Query(None),
@@ -41,7 +41,7 @@ async def get_template(
         raise HTTPException(status_code=404, detail="Template not found")
     return template
 
-@router.post("/", response_model=InterviewTemplateResponse, status_code=status.HTTP_201_CREATED)
+@router.post("", response_model=InterviewTemplateResponse, status_code=status.HTTP_201_CREATED)
 async def create_template(
     payload: InterviewTemplateCreate,
     db: AsyncSession = Depends(get_db_session)
@@ -51,10 +51,12 @@ async def create_template(
         title=payload.title,
         role_name=payload.role_name,
         description=payload.description,
-        is_rule_based=payload.is_rule_based,
         is_active=payload.is_active,
         is_default_for_role=payload.is_default_for_role,
-        settings=payload.settings
+        settings=payload.settings,
+        technical_config=payload.technical_config,
+        coding_config=payload.coding_config,
+        conversational_config=payload.conversational_config
     )
     
     db.add(new_template)

@@ -1,116 +1,216 @@
 import uuid
 import random
 import logging
+from dataclasses import dataclass, field
 from typing import List, Optional
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
-from sqlalchemy.orm import selectinload
 
-from app.db.sql.models.interview_template import InterviewTemplate, TemplateQuestion
+from app.db.sql.models.interview_template import InterviewTemplate
 from app.db.sql.models.question import Question, DifficultyEnum, CategoryEnum
+from app.db.sql.models.coding_problem import CodingProblem
 
 logger = logging.getLogger(__name__)
 
+
+# ─── Result types ─────────────────────────────────────────────────────────────
+
+@dataclass
+class TechnicalQuestionItem:
+    question_type: str = "technical"
+    question_id: Optional[uuid.UUID] = None
+    question: Optional[Question] = None
+
+
+@dataclass
+class CodingProblemItem:
+    question_type: str = "coding"
+    coding_problem_id: Optional[uuid.UUID] = None
+    coding_problem: Optional[CodingProblem] = None
+
+
+@dataclass
+class ConversationalRoundItem:
+    question_type: str = "conversational"
+    conversation_round: int = 1
+
+
+# Union type for all generated items
+GeneratedItem = TechnicalQuestionItem | CodingProblemItem | ConversationalRoundItem
+
+
+# ─── Engine ───────────────────────────────────────────────────────────────────
+
 class TemplateEngineService:
+
+    # ── Public orchestration ──────────────────────────────────────────────────
+
+    @staticmethod
+    async def generate_interview_questions(
+        template: InterviewTemplate,
+        session: AsyncSession
+    ) -> List[GeneratedItem]:
+        """
+        Orchestrates generation of all three interview sections in order:
+        1. Technical questions
+        2. Coding problems
+        3. Conversational rounds
+        """
+        results: List[GeneratedItem] = []
+
+        technical = await TemplateEngineService._generate_technical_questions(template, session)
+        results.extend(technical)
+
+        coding = await TemplateEngineService._generate_coding_questions(template, session)
+        results.extend(coding)
+
+        conversational = TemplateEngineService._generate_conversational_rounds(template)
+        results.extend(conversational)
+
+        return results
+
+    # ── Backward-compatible shim for legacy callers ───────────────────────────
+
     @staticmethod
     async def generate_questions_from_template(
         template_id: uuid.UUID,
         session: AsyncSession
     ) -> List[Question]:
-        """
-        Generates a list of questions based on the template configuration.
-        If is_rule_based is True, selects random questions based on distribution.
-        Otherwise, returns the fixed questions defined in the template.
-        """
-        # Load template with its fixed questions
+        """Legacy shim — returns only technical Question objects for old callers."""
         result = await session.execute(
-            select(InterviewTemplate)
-            .where(InterviewTemplate.id == template_id)
-            .options(selectinload(InterviewTemplate.questions).selectinload(TemplateQuestion.question))
+            select(InterviewTemplate).where(InterviewTemplate.id == template_id)
         )
         template = result.scalar_one_or_none()
-        
         if not template:
             return []
 
-        if template.is_rule_based:
-            return await TemplateEngineService._generate_rule_based_questions(template, session)
-        else:
-            # Sort by order and return questions
-            sorted_template_questions = sorted(template.questions, key=lambda x: x.order)
-            return [tq.question for tq in sorted_template_questions if tq.question]
+        items = await TemplateEngineService._generate_technical_questions(template, session)
+        return [item.question for item in items if item.question]
+
+    # ── Section generators ────────────────────────────────────────────────────
 
     @staticmethod
-    async def _generate_rule_based_questions(
+    async def _generate_technical_questions(
         template: InterviewTemplate,
         session: AsyncSession
-    ) -> List[Question]:
+    ) -> List[TechnicalQuestionItem]:
         """
-        Logic for rule-based generation:
-        Expects template.settings to have:
-        {
-            "difficulty_distribution": {"EASY": 2, "MEDIUM": 3, "HARD": 1},
-            "category_filters": ["PYTHON", "SQL"]
-        }
+        Generate technical questions from technical_config (flat difficulty map).
+        Falls back to settings.difficulty_distribution for legacy templates.
         """
-        settings = template.settings or {}
-        distribution = settings.get("difficulty_distribution", {})
-        categories = settings.get("category_filters", [])
-        
-        generated_questions = []
-        
-        # Sort distribution keys to ensure difficulty blocks are processed in a deterministic order (e.g., EASY->MEDIUM->HARD)
-        # We'll use a specific order: EASY, then MEDIUM, then HARD.
-        difficulty_order = {DifficultyEnum.EASY: 0, DifficultyEnum.MEDIUM: 1, DifficultyEnum.HARD: 2}
-        sorted_difficulties = sorted(
-            distribution.keys(), 
-            key=lambda d: difficulty_order.get(DifficultyEnum(d) if d in DifficultyEnum.__members__ else d, 99)
-        )
+        distribution: dict = {}
+        if template.technical_config and isinstance(template.technical_config, dict):
+            distribution = template.technical_config
+        elif template.settings and isinstance(template.settings, dict):
+            distribution = template.settings.get("difficulty_distribution", {})
 
-        for difficulty_str in sorted_difficulties:
-            count = distribution[difficulty_str]
+        categories = []
+        if template.settings and isinstance(template.settings, dict):
+            categories = template.settings.get("category_filters", [])
+
+        generated: List[TechnicalQuestionItem] = []
+
+        for difficulty_str, count in distribution.items():
+            if not isinstance(count, int) or count <= 0:
+                continue
             try:
-                difficulty = DifficultyEnum(difficulty_str)
+                difficulty = DifficultyEnum(difficulty_str.upper())
             except ValueError:
                 continue
-                
-            query = select(Question).where(
+
+            from app.db.sql.models.question import QuestionType
+            
+            query = select(Question).outerjoin(
+                CodingProblem, Question.id == CodingProblem.question_id
+            ).where(
                 Question.difficulty == difficulty,
-                Question.is_active == True
+                Question.is_active == True,
+                (Question.question_type != QuestionType.CODING) | (CodingProblem.id.isnot(None))
             )
-            
-            # Exclude already selected questions to be 100% sure of no duplicates
-            if generated_questions:
-                excluded_ids = [q.id for q in generated_questions]
-                query = query.where(Question.id.not_in(excluded_ids))
-            
-            # Category filters: If empty, it naturally means "all categories"
+
+            if generated:
+                excluded_ids = [item.question_id for item in generated if item.question_id]
+                if excluded_ids:
+                    query = query.where(Question.id.not_in(excluded_ids))
+
             if categories:
-                cat_enums = []
-                for cat_str in categories:
-                    try:
-                        cat_enums.append(CategoryEnum(cat_str))
-                    except ValueError:
-                        continue
+                cat_enums = [CategoryEnum(c) for c in categories if c in CategoryEnum.__members__]
                 if cat_enums:
                     query = query.where(Question.category.in_(cat_enums))
-            
-            # Use random order for rule-based, deterministic LIMIT within this difficulty block
+
             query = query.order_by(func.random()).limit(count)
-            
-            result = await session.execute(query)
-            batch = result.scalars().all()
-            
+            res = await session.execute(query)
+            batch = res.scalars().all()
+
             if len(batch) < count:
                 logger.warning(
-                    f"Could not satisfy distribution for {difficulty_str}. "
-                    f"Requested {count}, found {len(batch)}."
+                    f"[technical] Requested {count} {difficulty_str} questions, found {len(batch)}."
                 )
 
-            generated_questions.extend(batch)
-            
-        # We DO NOT shuffle here to maintain "Deterministic order within each difficulty block"
-        # The questions will appear in the order of sorted_difficulties.
-        return generated_questions
+            for q in batch:
+                generated.append(TechnicalQuestionItem(question_id=q.id, question=q))
+
+        return generated
+
+    @staticmethod
+    async def _generate_coding_questions(
+        template: InterviewTemplate,
+        session: AsyncSession
+    ) -> List[CodingProblemItem]:
+        """
+        Generate coding problems from coding_config:
+        { "count": 2, "difficulty": ["medium", "hard"] }
+        """
+        config = template.coding_config or {}
+        if not isinstance(config, dict):
+            return []
+
+        count = config.get("count", 0)
+        difficulties = config.get("difficulty", [])
+
+        if not isinstance(count, int) or count <= 0:
+            return []
+        if not isinstance(difficulties, list) or not difficulties:
+            return []
+
+        valid_diffs = [d.upper() for d in difficulties if isinstance(d, str)]
+        if not valid_diffs:
+            return []
+
+        query = select(CodingProblem).where(
+            func.upper(CodingProblem.difficulty).in_(valid_diffs)
+        ).order_by(func.random()).limit(count)
+
+        res = await session.execute(query)
+        problems = res.scalars().all()
+
+        if len(problems) < count:
+            logger.warning(
+                f"[coding] Requested {count} problems (diffs={valid_diffs}), found {len(problems)}."
+            )
+
+        return [
+            CodingProblemItem(coding_problem_id=p.id, coding_problem=p)
+            for p in problems
+        ]
+
+    @staticmethod
+    def _generate_conversational_rounds(
+        template: InterviewTemplate
+    ) -> List[ConversationalRoundItem]:
+        """
+        Generate placeholder conversational round entries from conversational_config:
+        { "rounds": 3 }
+        """
+        config = template.conversational_config or {}
+        if not isinstance(config, dict):
+            return []
+
+        rounds = config.get("rounds", 0)
+        if not isinstance(rounds, int) or rounds <= 0:
+            return []
+
+        return [ConversationalRoundItem(conversation_round=i) for i in range(1, rounds + 1)]
+
 
 template_engine = TemplateEngineService()

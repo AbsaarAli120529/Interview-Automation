@@ -4,11 +4,14 @@ Answer Evaluation Service
 Evaluates candidate answers using Azure OpenAI LLM and assigns scores (0-10).
 """
 
+import os
 import logging
 from typing import Dict, Any, Optional
 from app.services.azure_openai_service import azure_openai_service
 
 logger = logging.getLogger(__name__)
+
+DEV_MODE = os.getenv("DEV_MODE", "false").lower() == "true"
 
 
 class AnswerEvaluationService:
@@ -37,6 +40,16 @@ class AnswerEvaluationService:
         Returns:
             Dictionary with score, feedback, and evaluation details
         """
+        if DEV_MODE:
+            logger.info("DEV_MODE is enabled. Returning mock evaluation.")
+            return {
+                "score": 7,
+                "feedback": "Dev mode evaluation placeholder.",
+                "strengths": ["Clear explanation"],
+                "weaknesses": ["Needs deeper detail"],
+                "suggestions": ["Expand on architecture decisions"],
+            }
+
         if not azure_openai_service.client:
             logger.warning("Azure OpenAI not configured, returning mock evaluation")
             return AnswerEvaluationService._generate_mock_evaluation(question)

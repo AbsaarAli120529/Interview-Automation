@@ -45,6 +45,3 @@ class Question(Base):
         nullable=False,
         server_default="technical"
     )
-
-    # Relationship to TemplateQuestion
-    template_questions: Mapped[list["TemplateQuestion"]] = relationship("TemplateQuestion", back_populates="question")

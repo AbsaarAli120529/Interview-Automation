@@ -83,6 +83,10 @@ class CodeSubmission(Base):
         ForeignKey("users.id", ondelete="CASCADE"),
         nullable=False,
     )
+    session_question_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("interview_session_questions.id", ondelete="CASCADE"),
+        nullable=True,
+    )
 
     language: Mapped[str] = mapped_column(String, nullable=False)
     source_code: Mapped[str] = mapped_column(Text, nullable=False)

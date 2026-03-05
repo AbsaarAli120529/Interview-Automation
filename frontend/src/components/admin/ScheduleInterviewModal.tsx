@@ -46,28 +46,35 @@ export default function ScheduleInterviewModal({
     };
 
     const [previewQuestions, setPreviewQuestions] = useState<TemplatePreviewQuestion[]>([]);
+    const [previewCodingProblems, setPreviewCodingProblems] = useState<{ problem_id: string; title: string; difficulty: string }[]>([]);
+    const [previewConvRounds, setPreviewConvRounds] = useState<number>(0);
     const [previewLoading, setPreviewLoading] = useState(false);
 
     // ─── Fetch preview when templateId changes ───────────────────────────────
     useEffect(() => {
         if (mode !== 'schedule' || !templateId) {
-            setPreviewQuestions([]); // Clear preview if templateId is not selected or mode is not schedule
+            setPreviewQuestions([]);
+            setPreviewCodingProblems([]);
+            setPreviewConvRounds(0);
             return;
         }
 
         setPreviewLoading(true);
         previewTemplate(templateId)
             .then((data) => {
-                // Store original text for comparison on submission
-                const augmented = data.questions.map(q => ({
-                    ...q,
-                    originalText: q.text
-                }));
-                setPreviewQuestions(augmented);
+                // Technical questions
+                const rawQuestions = data.technical_section?.questions ?? [];
+                setPreviewQuestions(rawQuestions.map(q => ({ ...q, originalText: q.text })));
+                // Coding problems
+                setPreviewCodingProblems(data.coding_section?.problems ?? []);
+                // Conversational rounds
+                setPreviewConvRounds(data.conversational_section?.rounds ?? 0);
             })
             .catch((err: SchedulingApiError) => {
-                setError(`Failed to load template preview: ${err.detail}`);
+                setError(`Failed to load template preview: ${err.detail || 'Unknown error'}`);
                 setPreviewQuestions([]);
+                setPreviewCodingProblems([]);
+                setPreviewConvRounds(0);
             })
             .finally(() => setPreviewLoading(false));
     }, [templateId, mode]);
@@ -116,6 +123,15 @@ export default function ScheduleInterviewModal({
             })
             .finally(() => setTemplatesLoading(false));
     }, [mode, onAuthError, templateId, roleName]);
+
+    // ─── Accessibility: Close on Escape ───────────────────────────────────────
+    useEffect(() => {
+        const handleKeyDown = (e: KeyboardEvent) => {
+            if (e.key === 'Escape' && !loading) onClose();
+        };
+        window.addEventListener('keydown', handleKeyDown);
+        return () => window.removeEventListener('keydown', handleKeyDown);
+    }, [onClose, loading]);
 
     // ─── Submit ───────────────────────────────────────────────────────────────
     const handleSubmit = async (e: React.FormEvent) => {
@@ -171,8 +187,11 @@ export default function ScheduleInterviewModal({
     };
 
     return (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
-            <div className="bg-white rounded-xl w-full max-w-md shadow-2xl overflow-hidden">
+        <div
+            className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50 overflow-hidden"
+            onClick={(e) => { if (e.target === e.currentTarget && !loading) onClose(); }}
+        >
+            <div className="bg-white rounded-xl w-full max-w-md shadow-2xl overflow-hidden max-h-[95vh] flex flex-col">
                 {/* Header */}
                 <div className="bg-gradient-to-r from-blue-600 to-indigo-600 px-6 py-5">
                     <div className="flex justify-between items-start">
@@ -194,8 +213,8 @@ export default function ScheduleInterviewModal({
                     </div>
                 </div>
 
-                {/* Body */}
-                <form onSubmit={handleSubmit} className="p-6 space-y-5">
+                {/* Body - Scrollable */}
+                <form onSubmit={handleSubmit} className="p-6 space-y-5 overflow-y-auto flex-1">
                     {/* Error banner */}
                     {error && (
                         <div className="flex items-start gap-2 p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700">
@@ -241,12 +260,10 @@ export default function ScheduleInterviewModal({
                         </div>
                     )}
 
-                    {/* Preview Questions (Editable List) */}
+                    {/* ── Preview Panel ── */}
                     {mode === 'schedule' && templateId && (
                         <div className="space-y-3">
-                            <label className="block text-sm font-medium text-gray-700">
-                                Interview Questions ({previewQuestions.length})
-                            </label>
+                            <p className="text-xs font-bold uppercase tracking-widest text-gray-400">Interview Preview</p>
 
                             {previewLoading ? (
                                 <div className="text-sm text-gray-500 italic flex items-center gap-2">
@@ -257,79 +274,120 @@ export default function ScheduleInterviewModal({
                                     Generating preview...
                                 </div>
                             ) : (
-                                <div className="space-y-3 max-h-60 overflow-y-auto pr-2 custom-scrollbar border border-gray-100 rounded-lg p-3 bg-gray-50">
-                                    {previewQuestions.map((q, idx) => (
-                                        <div key={idx} className="group relative bg-white border hover:border-blue-200 rounded-lg p-3 transition-all duration-200 shadow-sm">
-                                            <div className="flex justify-between items-center mb-2">
-                                                <span className="text-[10px] font-bold uppercase tracking-wider text-gray-400 bg-gray-100 px-1.5 py-0.5 rounded">
-                                                    Q{idx + 1} • {q.difficulty} • {q.category}
-                                                </span>
-                                                <div className="flex items-center gap-2">
-                                                    {editingIdx !== idx && (
-                                                        <button
-                                                            type="button"
-                                                            onClick={() => {
-                                                                setEditingIdx(idx);
-                                                                setTempEditText(q.text);
-                                                            }}
-                                                            className="text-[10px] font-bold text-blue-500 hover:text-blue-700 uppercase"
-                                                        >
-                                                            Edit
-                                                        </button>
-                                                    )}
-                                                    <button
-                                                        type="button"
-                                                        onClick={() => setPreviewQuestions(prev => prev.filter((_, i) => i !== idx))}
-                                                        className="text-gray-300 hover:text-red-500 transition-colors opacity-0 group-hover:opacity-100"
-                                                        title="Remove question"
-                                                    >
-                                                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                                                        </svg>
-                                                    </button>
-                                                </div>
-                                            </div>
+                                <div className="space-y-3">
 
-                                            {editingIdx === idx ? (
-                                                <div className="space-y-2">
-                                                    <textarea
-                                                        autoFocus
-                                                        value={tempEditText}
-                                                        onChange={(e) => setTempEditText(e.target.value)}
-                                                        className="w-full text-sm text-gray-700 bg-white border border-blue-100 rounded p-2 focus:ring-1 focus:ring-blue-500 outline-none resize-none"
-                                                        rows={3}
-                                                    />
-                                                    <div className="flex justify-end gap-2">
-                                                        <button
-                                                            type="button"
-                                                            onClick={() => setEditingIdx(null)}
-                                                            className="text-xs text-gray-400 hover:text-gray-600 px-2 py-1"
-                                                        >
-                                                            Cancel
-                                                        </button>
-                                                        <button
-                                                            type="button"
-                                                            onClick={() => {
-                                                                setPreviewQuestions(prev => prev.map((item, i) => i === idx ? { ...item, text: tempEditText } : item));
-                                                                setEditingIdx(null);
-                                                            }}
-                                                            className="text-xs bg-blue-500 text-white px-2 py-1 rounded hover:bg-blue-600"
-                                                        >
-                                                            Save
-                                                        </button>
-                                                    </div>
-                                                </div>
-                                            ) : (
-                                                <p className="text-sm text-gray-700 font-medium leading-relaxed whitespace-pre-wrap">
-                                                    {q.text}
+                                    {/* ── Technical Questions ── */}
+                                    {previewQuestions.length > 0 && (
+                                        <div>
+                                            <div className="flex items-center gap-2 mb-2">
+                                                <span className="w-2 h-2 rounded-full bg-blue-500 shrink-0" />
+                                                <p className="text-xs font-bold text-gray-700 uppercase tracking-wide">
+                                                    Technical Questions ({previewQuestions.length})
                                                 </p>
-                                            )}
+                                            </div>
+                                            <div className="space-y-2 max-h-48 overflow-y-auto pr-1">
+                                                {previewQuestions.map((q, idx) => (
+                                                    <div key={idx} className="group relative bg-white border hover:border-blue-200 rounded-lg p-3 transition-all duration-200 shadow-sm">
+                                                        <div className="flex justify-between items-center mb-1.5">
+                                                            <span className="text-[10px] font-bold uppercase tracking-wider text-gray-400 bg-gray-100 px-1.5 py-0.5 rounded">
+                                                                Q{idx + 1} • {q.difficulty} • {q.category}
+                                                            </span>
+                                                            <div className="flex items-center gap-2">
+                                                                {editingIdx !== idx && (
+                                                                    <button type="button" onClick={() => { setEditingIdx(idx); setTempEditText(q.text); }}
+                                                                        className="text-[10px] font-bold text-blue-500 hover:text-blue-700 uppercase">
+                                                                        Edit
+                                                                    </button>
+                                                                )}
+                                                                <button type="button"
+                                                                    onClick={() => setPreviewQuestions(prev => prev.filter((_, i) => i !== idx))}
+                                                                    className="text-gray-300 hover:text-red-500 transition-colors opacity-0 group-hover:opacity-100"
+                                                                    title="Remove question">
+                                                                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                                                                    </svg>
+                                                                </button>
+                                                            </div>
+                                                        </div>
+                                                        {editingIdx === idx ? (
+                                                            <div className="space-y-2">
+                                                                <textarea autoFocus value={tempEditText}
+                                                                    onChange={(e) => setTempEditText(e.target.value)}
+                                                                    className="w-full text-sm text-gray-700 bg-white border border-blue-100 rounded p-2 focus:ring-1 focus:ring-blue-500 outline-none resize-none"
+                                                                    rows={3} />
+                                                                <div className="flex justify-end gap-2">
+                                                                    <button type="button" onClick={() => setEditingIdx(null)}
+                                                                        className="text-xs text-gray-400 hover:text-gray-600 px-2 py-1">Cancel</button>
+                                                                    <button type="button"
+                                                                        onClick={() => {
+                                                                            setPreviewQuestions(prev => prev.map((item, i) => i === idx ? { ...item, text: tempEditText } : item));
+                                                                            setEditingIdx(null);
+                                                                        }}
+                                                                        className="text-xs bg-blue-500 text-white px-2 py-1 rounded hover:bg-blue-600">Save</button>
+                                                                </div>
+                                                            </div>
+                                                        ) : (
+                                                            <p className="text-sm text-gray-700 font-medium leading-relaxed whitespace-pre-wrap">{q.text}</p>
+                                                        )}
+                                                    </div>
+                                                ))}
+                                            </div>
                                         </div>
-                                    ))}
+                                    )}
 
-                                    {previewQuestions.length === 0 && (
+                                    {/* ── Coding Problems ── */}
+                                    {previewCodingProblems.length > 0 && (
+                                        <div>
+                                            <div className="flex items-center gap-2 mb-2">
+                                                <span className="w-2 h-2 rounded-full bg-purple-500 shrink-0" />
+                                                <p className="text-xs font-bold text-gray-700 uppercase tracking-wide">
+                                                    Coding Problems ({previewCodingProblems.length})
+                                                </p>
+                                            </div>
+                                            <div className="space-y-1.5">
+                                                {previewCodingProblems.map((p, idx) => {
+                                                    const diffColor: Record<string, string> = {
+                                                        easy: 'bg-green-50 text-green-700 border-green-200',
+                                                        medium: 'bg-amber-50 text-amber-700 border-amber-200',
+                                                        hard: 'bg-red-50 text-red-700 border-red-200',
+                                                    };
+                                                    const color = diffColor[p.difficulty?.toLowerCase() ?? ''] ?? 'bg-gray-50 text-gray-600 border-gray-200';
+                                                    return (
+                                                        <div key={idx} className="flex items-center justify-between bg-white border rounded-lg px-3 py-2 shadow-sm">
+                                                            <span className="text-sm text-gray-800 font-medium">• {p.title}</span>
+                                                            <span className={`text-[10px] font-bold uppercase px-2 py-0.5 rounded-full border ${color}`}>
+                                                                {p.difficulty}
+                                                            </span>
+                                                        </div>
+                                                    );
+                                                })}
+                                            </div>
+                                        </div>
+                                    )}
+
+                                    {/* ── Conversational Section ── */}
+                                    {previewConvRounds > 0 && (
+                                        <div>
+                                            <div className="flex items-center gap-2 mb-2">
+                                                <span className="w-2 h-2 rounded-full bg-emerald-500 shrink-0" />
+                                                <p className="text-xs font-bold text-gray-700 uppercase tracking-wide">Conversational Interview</p>
+                                            </div>
+                                            <div className="flex items-start gap-3 bg-emerald-50 border border-emerald-100 rounded-lg px-4 py-3">
+                                                <svg className="w-4 h-4 text-emerald-500 mt-0.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-3 3-3-3z" />
+                                                </svg>
+                                                <p className="text-sm text-emerald-800">
+                                                    <span className="font-bold">{previewConvRounds} AI-driven round{previewConvRounds !== 1 ? 's' : ''}</span>
+                                                    {' '}based on candidate resume and job description.
+                                                </p>
+                                            </div>
+                                        </div>
+                                    )}
+
+                                    {/* Empty state — nothing in any section */}
+                                    {previewQuestions.length === 0 && previewCodingProblems.length === 0 && previewConvRounds === 0 && (
                                         <div className="text-center py-6 border-2 border-dashed border-gray-100 rounded-lg">
-                                            <p className="text-xs text-gray-400">No questions selected.</p>
+                                            <p className="text-xs text-gray-400">No preview available for this template.</p>
                                         </div>
                                     )}
                                 </div>

@@ -7,6 +7,8 @@ import {
     CodeRunResponse,
     CodeSubmitResponse
 } from "@/lib/api/codingApi"
+import { useInterviewStore } from "./interviewStore"
+import { interviewService } from "@/lib/interviewService"
 
 interface CodingState {
     problem: CodingProblem | null
@@ -44,6 +46,7 @@ export const useCodingStore = create<CodingState>((set, get) => ({
         // Backend returns 'starter_code' as a dict mapping lang -> code
         const problem: CodingProblem = {
             id: question.problem_id,
+            session_question_id: question.session_question_id,
             title: question.title,
             description: question.description,
             difficulty: question.difficulty || "medium",
@@ -86,6 +89,7 @@ export const useCodingStore = create<CodingState>((set, get) => ({
         try {
             const response: CodeRunResponse = await runCode({
                 problem_id: problem.id,
+                session_question_id: problem.session_question_id,
                 language,
                 source_code: code
             })
@@ -107,6 +111,7 @@ export const useCodingStore = create<CodingState>((set, get) => ({
         try {
             const response: CodeSubmitResponse = await submitCode({
                 problem_id: problem.id,
+                session_question_id: problem.session_question_id,
                 language,
                 source_code: code,
                 interview_id: interviewId,
@@ -119,6 +124,28 @@ export const useCodingStore = create<CodingState>((set, get) => ({
                 isSubmitted: true,
                 submissionStatus: response.status as "passed" | "failed" | "error"
             })
+
+            if (response.state) {
+                const intState = useInterviewStore.getState()
+                useInterviewStore.setState({ state: response.state as any })
+
+                if (response.state === "IN_PROGRESS") {
+                    setTimeout(() => {
+                        intState.fetchNextQuestion()
+                    }, 2000) // 2 second delay to see the results
+                } else if (response.state === "COMPLETED" || response.state === "SECTION_COMPLETED") {
+                    setTimeout(async () => {
+                        const sect = await interviewService.getSections()
+                        const active = sect.find(s => s.status === "in_progress" || s.is_current) || null
+                        useInterviewStore.setState({ sections: sect, currentSection: active, currentQuestion: null })
+                        if (active) {
+                            useInterviewStore.setState({ state: "IN_PROGRESS" as any })
+                        } else if (response.state === "SECTION_COMPLETED") {
+                            useInterviewStore.setState({ state: "READY" as any })
+                        }
+                    }, 2000)
+                }
+            }
         } catch (err: any) {
             set({ error: err.message || "Failed to submit code", isSubmitting: false })
         }

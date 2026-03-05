@@ -1,7 +1,7 @@
 import logging
 from sqlalchemy import select, literal
 from sqlalchemy.ext.asyncio import AsyncSession
-from app.db.sql.models.interview_template import InterviewTemplate, TemplateQuestion
+from app.db.sql.models.interview_template import InterviewTemplate
 from app.db.sql.models.question import Question, CategoryEnum, DifficultyEnum
 
 logger = logging.getLogger(__name__)
@@ -22,7 +22,7 @@ async def seed_templates(session: AsyncSession):
     if already_exists:
         logger.info("[template_seed] Active template already exists. Checking for Default Rule Template...")
     
-    # 1. Ensure a rule-based template exists
+    # 1. Ensure a default template exists
     rule_stmt = select(InterviewTemplate).where(InterviewTemplate.title == "Default Rule Template")
     rule_res = await session.execute(rule_stmt)
     if not rule_res.scalar_one_or_none():
@@ -31,13 +31,10 @@ async def seed_templates(session: AsyncSession):
             title="Default Rule Template",
             description="Automatic question selection based on complexity",
             is_active=True,
-            is_rule_based=True,
-            settings={
-                "difficulty_distribution": {
-                    "EASY": 2,
-                    "MEDIUM": 2,
-                    "HARD": 1
-                }
+            technical_config={
+                "easy": 2,
+                "medium": 2,
+                "hard": 1
             }
         )
         session.add(rule_template)
@@ -47,3 +44,4 @@ async def seed_templates(session: AsyncSession):
         return
 
     logger.info("[OK] Template seeding check completed.")
+

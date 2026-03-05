@@ -12,31 +12,37 @@ export interface InterviewTemplate {
     role_name?: string | null;
     description?: string | null;
     is_active: boolean;
-    is_rule_based: boolean;
     is_default_for_role: boolean;
     created_at: string;
     updated_at: string;
     settings?: Record<string, any> | null;
+    technical_config?: Record<string, any> | null;
+    coding_config?: Record<string, any> | null;
+    conversational_config?: Record<string, any> | null;
 }
 
 export interface InterviewTemplateCreate {
     title: string;
     role_name?: string;
     description?: string;
-    is_rule_based: boolean;
     is_active?: boolean;
     is_default_for_role?: boolean;
     settings?: Record<string, any>;
+    technical_config?: Record<string, any> | null;
+    coding_config?: Record<string, any> | null;
+    conversational_config?: Record<string, any> | null;
 }
 
 export interface InterviewTemplateUpdate {
     title?: string;
     role_name?: string;
     description?: string;
-    is_rule_based?: boolean;
     is_active?: boolean;
     is_default_for_role?: boolean;
     settings?: Record<string, any>;
+    technical_config?: Record<string, any> | null;
+    coding_config?: Record<string, any> | null;
+    conversational_config?: Record<string, any> | null;
 }
 
 export interface CandidateInterview {
@@ -78,13 +84,15 @@ export interface ScheduleInterviewRequest {
 export interface TemplatePreviewQuestion {
     question_id: string;
     text: string;
-    originalText?: string; // Keep track of the text before editing
+    originalText?: string;
     difficulty: string;
     category: string;
 }
 
 export interface TemplatePreviewResponse {
-    questions: TemplatePreviewQuestion[];
+    technical_section: { questions: TemplatePreviewQuestion[] };
+    coding_section: { problems: { problem_id: string; title: string; difficulty: string }[] };
+    conversational_section: { rounds: number; description: string };
 }
 
 export interface RescheduleInterviewRequest {

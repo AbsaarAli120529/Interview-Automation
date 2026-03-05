@@ -17,12 +17,18 @@ interface InterviewStore {
     isConnected: boolean;
     error: string | null;
 
+    sections: import("@/types/api").InterviewSection[];
+    currentSection: import("@/types/api").InterviewSection | null;
+
     initialize: (interviewId: string, candidateToken: string) => void;
     startInterview: () => Promise<void>;
     fetchNextQuestion: () => Promise<void>;
     submitAnswer: (payload: EvaluationSubmitRequest) => Promise<void>;
     sendProctoringEvent: (event: ProctoringEventRequest) => Promise<void>;
     terminate: () => void;
+
+    fetchSections?: () => Promise<void>;
+    startSection: (sectionType: string) => Promise<void>;
 }
 
 export const useInterviewStore = create<InterviewStore>((set, get) => ({
@@ -34,6 +40,8 @@ export const useInterviewStore = create<InterviewStore>((set, get) => ({
     isSubmitting: false,
     isConnected: false,
     error: null,
+    sections: [],
+    currentSection: null,
 
     initialize: (interviewId: string, candidateToken: string) => {
         set({ interviewId, candidateToken, error: null });
@@ -61,8 +69,15 @@ export const useInterviewStore = create<InterviewStore>((set, get) => ({
         try {
             const state = await interviewService.startInterview();
             set({ state });
-            if (state === "IN_PROGRESS") {
-                await get().fetchNextQuestion();
+
+            // fetch sections initially
+            if (state === "IN_PROGRESS" || state === "READY") {
+                const sect = await interviewService.getSections();
+                const active = sect.find(s => s.status === "in_progress" || s.is_current) || null;
+                set({ sections: sect, currentSection: active });
+                if (active) {
+                    await get().fetchNextQuestion();
+                }
             }
         } catch (error) {
             const errorMessage = error instanceof Error ? error.message : "Failed to start interview";
@@ -87,12 +102,26 @@ export const useInterviewStore = create<InterviewStore>((set, get) => ({
         set({ isSubmitting: true, error: null });
         try {
             const state = await interviewService.submitAnswer(payload);
-            set({ state });
-
             if (state === "IN_PROGRESS") {
+                set({ state });
                 await get().fetchNextQuestion();
-            } else if (state === "COMPLETED") {
-                set({ currentQuestion: null });
+            } else if (state === "COMPLETED" || state === "SECTION_COMPLETED") {
+                // Clear immediately to trigger UI change to SectionSelector or results
+                set({ state, currentQuestion: null, currentSection: null });
+
+                // Refresh sections to get latest counts and statuses
+                const sect = await interviewService.getSections();
+                const active = sect.find(s => s.status === "in_progress" || s.is_current) || null;
+                set({ sections: sect, currentSection: active });
+
+                if (active) {
+                    set({ state: "IN_PROGRESS" });
+                    await get().fetchNextQuestion();
+                } else if (state === "SECTION_COMPLETED") {
+                    set({ state: "READY" });
+                }
+            } else {
+                set({ state });
             }
         } catch (error) {
             const errorMessage = error instanceof Error ? error.message : "Failed to submit answer";
@@ -124,6 +153,28 @@ export const useInterviewStore = create<InterviewStore>((set, get) => ({
             isSubmitting: false,
             isConnected: false,
             error: null,
+            sections: [],
+            currentSection: null,
         });
     },
+
+    // Optional explicit startSection handler
+    startSection: async (sectionType: string) => {
+        set({ error: null });
+        try {
+            const state = await interviewService.startSection(sectionType);
+            set({ state });
+
+            const sect = await interviewService.getSections();
+            const active = sect.find(s => s.status === "in_progress" || s.is_current) || null;
+            set({ sections: sect, currentSection: active });
+
+            if (active) {
+                await get().fetchNextQuestion();
+            }
+        } catch (error) {
+            const errorMessage = error instanceof Error ? error.message : "Failed to start section";
+            set({ error: errorMessage });
+        }
+    }
 }));

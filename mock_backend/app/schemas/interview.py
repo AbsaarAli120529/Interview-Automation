@@ -83,10 +83,12 @@ class InterviewTemplateResponse(BaseModel):
     title: str
     role_name: Optional[str] = None
     description: Optional[str] = None
-    is_rule_based: bool
     is_active: bool
     is_default_for_role: bool
     settings: Optional[dict] = None
+    technical_config: Optional[dict] = None
+    coding_config: Optional[dict] = None
+    conversational_config: Optional[dict] = None
     created_at: datetime
     updated_at: datetime
 
@@ -98,20 +100,24 @@ class InterviewTemplateCreate(BaseModel):
     title: str
     role_name: Optional[str] = None
     description: Optional[str] = None
-    is_rule_based: bool
     is_active: bool = True
     is_default_for_role: bool = False
     settings: Optional[dict] = None
+    technical_config: Optional[dict] = None
+    coding_config: Optional[dict] = None
+    conversational_config: Optional[dict] = None
 
 
 class InterviewTemplateUpdate(BaseModel):
     title: Optional[str] = None
     role_name: Optional[str] = None
     description: Optional[str] = None
-    is_rule_based: Optional[bool] = None
     is_active: Optional[bool] = None
     is_default_for_role: Optional[bool] = None
     settings: Optional[dict] = None
+    technical_config: Optional[dict] = None
+    coding_config: Optional[dict] = None
+    conversational_config: Optional[dict] = None
 
 
 class ScheduleInterviewResponse(BaseModel):

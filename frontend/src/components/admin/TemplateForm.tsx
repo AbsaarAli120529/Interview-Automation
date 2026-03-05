@@ -1,7 +1,7 @@
 'use client';
 
 import { useState } from 'react';
-import { InterviewTemplateCreate, InterviewTemplateUpdate, InterviewTemplate } from '@/types/interview';
+import { InterviewTemplate } from '@/types/interview';
 
 interface TemplateFormProps {
     initialData?: InterviewTemplate;
@@ -9,60 +9,159 @@ interface TemplateFormProps {
     onCancel: () => void;
 }
 
+// ─── Section collapse state ───────────────────────────────────────────────────
+
+function SectionHeader({
+    title,
+    description,
+    color,
+    isOpen,
+    onToggle,
+}: {
+    title: string;
+    description: string;
+    color: string;
+    isOpen: boolean;
+    onToggle: () => void;
+}) {
+    return (
+        <button
+            type="button"
+            onClick={onToggle}
+            className="w-full flex items-center justify-between p-4 rounded-xl bg-white border hover:bg-gray-50 transition-colors text-left"
+        >
+            <div className="flex items-center gap-3">
+                <span className={`w-2.5 h-2.5 rounded-full ${color}`} />
+                <div>
+                    <p className="text-sm font-bold text-gray-900">{title}</p>
+                    <p className="text-xs text-gray-500">{description}</p>
+                </div>
+            </div>
+            <svg
+                className={`w-4 h-4 text-gray-400 transition-transform duration-200 ${isOpen ? 'rotate-180' : ''}`}
+                fill="none" viewBox="0 0 24 24" stroke="currentColor"
+            >
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+            </svg>
+        </button>
+    );
+}
+
+// ─── Main Form ────────────────────────────────────────────────────────────────
+
 export default function TemplateForm({ initialData, onSubmit, onCancel }: TemplateFormProps) {
+    // Basic fields
     const [title, setTitle] = useState(initialData?.title || '');
     const [roleName, setRoleName] = useState(initialData?.role_name || '');
     const [description, setDescription] = useState(initialData?.description || '');
-    const [isRuleBased, setIsRuleBased] = useState(initialData?.is_rule_based ?? false);
     const [isActive, setIsActive] = useState(initialData?.is_active ?? true);
     const [isDefaultForRole, setIsDefaultForRole] = useState(initialData?.is_default_for_role ?? false);
 
-    // Settings for rule-based
-    const [easyCount, setEasyCount] = useState(initialData?.settings?.difficulty_distribution?.EASY || 0);
-    const [mediumCount, setMediumCount] = useState(initialData?.settings?.difficulty_distribution?.MEDIUM || 0);
-    const [hardCount, setHardCount] = useState(initialData?.settings?.difficulty_distribution?.HARD || 0);
-    const [categoryFilters, setCategoryFilters] = useState<string[]>(initialData?.settings?.category_filters || []);
+    // Section collapse states
+    const [techOpen, setTechOpen] = useState(true);
+    const [codingOpen, setCodingOpen] = useState(true);
+    const [convOpen, setConvOpen] = useState(true);
+
+    // ── Technical config ──
+    // Prefer technical_config; fall back to the legacy settings field
+    const legacyDist = initialData?.settings?.difficulty_distribution || {};
+    const techCfg = initialData?.technical_config || legacyDist;
+    const [easyCount, setEasyCount] = useState<number>(techCfg?.easy ?? techCfg?.EASY ?? 0);
+    const [mediumCount, setMediumCount] = useState<number>(techCfg?.medium ?? techCfg?.MEDIUM ?? 0);
+    const [hardCount, setHardCount] = useState<number>(techCfg?.hard ?? techCfg?.HARD ?? 0);
+
+    // ── Coding config ──
+    const initCoding = initialData?.coding_config || {};
+    const [codingCount, setCodingCount] = useState<number>(initCoding?.count ?? 0);
+    const [codingDifficulties, setCodingDifficulties] = useState<string[]>(initCoding?.difficulty ?? []);
+
+    // ── Conversational config ──
+    const initConv = initialData?.conversational_config || {};
+    const [convRounds, setConvRounds] = useState<number>(initConv?.rounds ?? 0);
 
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState('');
 
+    const toggleCodingDiff = (d: string) =>
+        setCodingDifficulties(prev => prev.includes(d) ? prev.filter(x => x !== d) : [...prev, d]);
+
     const handleSubmit = async (e: React.FormEvent) => {
         e.preventDefault();
-        setLoading(true);
         setError('');
 
+        // ── Validation ──────────────────────────────────────────────────────────
+        if (easyCount < 0 || mediumCount < 0 || hardCount < 0) {
+            setError('Technical question counts cannot be negative.');
+            return;
+        }
+        if (codingCount < 0) {
+            setError('Coding problem count cannot be negative.');
+            return;
+        }
+        if (convRounds < 0) {
+            setError('Conversational rounds cannot be negative.');
+            return;
+        }
+        // If coding section is partially configured, require both fields
+        if ((codingCount > 0 && codingDifficulties.length === 0)) {
+            setError('Select at least one difficulty level for the Coding section.');
+            return;
+        }
+
+        setLoading(true);
+
+        // ── technical_config: always flat {easy, medium, hard} ──────────────────
+        const technical_config = {
+            easy: Number(easyCount),
+            medium: Number(mediumCount),
+            hard: Number(hardCount),
+        };
+
+        // ── coding_config: null if nothing configured, difficulties lowercased ──
+        const coding_config = codingCount > 0 && codingDifficulties.length > 0
+            ? {
+                count: Number(codingCount),
+                difficulty: codingDifficulties.map(d => d.toLowerCase()),
+            }
+            : null;
+
+        // ── conversational_config: null if no rounds ─────────────────────────────
+        const conversational_config = convRounds > 0
+            ? { rounds: Number(convRounds) }
+            : null;
+
+        // ── Payload: no legacy settings ──────────────────────────────────────────
         const payload: any = {
             title,
             role_name: roleName || null,
             description: description || null,
-            is_rule_based: isRuleBased,
             is_active: isActive,
             is_default_for_role: isDefaultForRole,
-            settings: isRuleBased ? {
-                difficulty_distribution: {
-                    EASY: Number(easyCount),
-                    MEDIUM: Number(mediumCount),
-                    HARD: Number(hardCount)
-                },
-                category_filters: categoryFilters
-            } : initialData?.settings || {}
+            technical_config,
+            coding_config,
+            conversational_config,
         };
 
         try {
             await onSubmit(payload);
         } catch (err: any) {
-            setError(err.response?.data?.detail || 'Failed to save template');
+            setError(err.response?.data?.detail || err.detail || 'Failed to save template');
         } finally {
             setLoading(false);
         }
     };
 
-    const categories = ["PYTHON", "SQL", "MACHINE_LEARNING", "DATA_STRUCTURES", "SYSTEM_DESIGN", "STATISTICS"];
+    const difficultyOptions = ['easy', 'medium', 'hard'];
 
     return (
         <form onSubmit={handleSubmit} className="space-y-6">
-            {error && <div className="p-3 bg-red-50 text-red-700 text-sm rounded-lg border border-red-200">{error}</div>}
+            {error && (
+                <div className="p-3 bg-red-50 text-red-700 text-sm rounded-lg border border-red-200">
+                    {error}
+                </div>
+            )}
 
+            {/* ── Basic info ── */}
             <div className="space-y-4">
                 <div>
                     <label className="block text-sm font-semibold text-gray-700 mb-1">Title</label>
@@ -97,69 +196,137 @@ export default function TemplateForm({ initialData, onSubmit, onCancel }: Templa
                     <label className="block text-sm font-semibold text-gray-700 mb-1">Description</label>
                     <textarea
                         value={description} onChange={e => setDescription(e.target.value)}
-                        className="w-full px-4 py-2 text-gray-900 bg-white rounded-lg border focus:ring-2 focus:ring-blue-500 outline-none h-24 resize-none"
+                        className="w-full px-4 py-2 text-gray-900 bg-white rounded-lg border focus:ring-2 focus:ring-blue-500 outline-none h-20 resize-none"
                     />
                 </div>
 
-                <div className="p-4 bg-gray-50 rounded-xl border border-gray-100 space-y-4">
-                    <div className="flex items-center justify-between">
-                        <h3 className="text-sm font-bold text-gray-900">Logic Type</h3>
-                        <div className="flex bg-white p-1 rounded-lg border">
-                            <button
-                                type="button" onClick={() => setIsRuleBased(false)}
-                                className={`px-4 py-1.5 text-xs font-semibold rounded-md transition-all ${!isRuleBased ? 'bg-blue-600 text-white shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}
-                            >
-                                Fixed
-                            </button>
-                            <button
-                                type="button" onClick={() => setIsRuleBased(true)}
-                                className={`px-4 py-1.5 text-xs font-semibold rounded-md transition-all ${isRuleBased ? 'bg-blue-600 text-white shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}
-                            >
-                                Rule-Based
-                            </button>
-                        </div>
-                    </div>
+            </div>
 
-                    {isRuleBased ? (
-                        <div className="space-y-4 animate-in fade-in slide-in-from-top-2 duration-300">
-                            <div className="grid grid-cols-3 gap-4">
-                                <div>
-                                    <label className="block text-xs font-bold text-gray-500 uppercase mb-1">Easy</label>
-                                    <input type="number" value={easyCount} onChange={e => setEasyCount(Number(e.target.value))} className="w-full px-3 py-2 text-gray-900 bg-white rounded-lg border" />
-                                </div>
-                                <div>
-                                    <label className="block text-xs font-bold text-gray-500 uppercase mb-1">Medium</label>
-                                    <input type="number" value={mediumCount} onChange={e => setMediumCount(Number(e.target.value))} className="w-full px-3 py-2 text-gray-900 bg-white rounded-lg border" />
-                                </div>
-                                <div>
-                                    <label className="block text-xs font-bold text-gray-500 uppercase mb-1">Hard</label>
-                                    <input type="number" value={hardCount} onChange={e => setHardCount(Number(e.target.value))} className="w-full px-3 py-2 text-gray-900 bg-white rounded-lg border" />
-                                </div>
+            {/* ═══════════════════════════════════════════════════════════ */}
+            {/* INTERVIEW SECTIONS                                          */}
+            {/* ═══════════════════════════════════════════════════════════ */}
+            <div className="space-y-3">
+                <p className="text-xs font-bold uppercase tracking-widest text-gray-400">Interview Sections</p>
+
+                {/* ── TECHNICAL SECTION ── */}
+                <div className="rounded-xl border overflow-hidden">
+                    <SectionHeader
+                        title="Technical Section"
+                        description="Knowledge-based Q&A questions"
+                        color="bg-blue-500"
+                        isOpen={techOpen}
+                        onToggle={() => setTechOpen(o => !o)}
+                    />
+                    {techOpen && (
+                        <div className="p-4 bg-gray-50 border-t space-y-3">
+                            <p className="text-xs text-gray-500">
+                                Set how many questions to pull per difficulty level.
+                            </p>
+                            <div className="grid grid-cols-3 gap-3">
+                                {([['Easy', easyCount, setEasyCount], ['Medium', mediumCount, setMediumCount], ['Hard', hardCount, setHardCount]] as [string, number, (v: number) => void][]).map(([label, val, setter]) => (
+                                    <div key={label}>
+                                        <label className="block text-xs font-bold text-gray-500 uppercase mb-1">{label}</label>
+                                        <input
+                                            type="number" min={0} value={val}
+                                            onChange={e => setter(Number(e.target.value))}
+                                            className="w-full px-3 py-2 text-gray-900 bg-white rounded-lg border text-sm"
+                                        />
+                                    </div>
+                                ))}
+                            </div>
+                            <p className="text-xs text-gray-400">
+                                Config: {JSON.stringify({ easy: Number(easyCount), medium: Number(mediumCount), hard: Number(hardCount) })}
+                            </p>
+                        </div>
+                    )}
+                </div>
+
+                {/* ── CODING SECTION ── */}
+                <div className="rounded-xl border overflow-hidden">
+                    <SectionHeader
+                        title="Coding Section"
+                        description="Algorithm and coding challenges"
+                        color="bg-purple-500"
+                        isOpen={codingOpen}
+                        onToggle={() => setCodingOpen(o => !o)}
+                    />
+                    {codingOpen && (
+                        <div className="p-4 bg-gray-50 border-t space-y-4">
+                            <div>
+                                <label className="block text-xs font-bold text-gray-500 uppercase mb-1">
+                                    Number of Problems
+                                </label>
+                                <input
+                                    type="number" min={0} value={codingCount}
+                                    onChange={e => setCodingCount(Number(e.target.value))}
+                                    placeholder="0"
+                                    className="w-32 px-3 py-2 text-gray-900 bg-white rounded-lg border text-sm"
+                                />
                             </div>
                             <div>
-                                <label className="block text-xs font-bold text-gray-500 uppercase mb-2">Categories</label>
-                                <div className="grid grid-cols-2 gap-2">
-                                    {categories.map(cat => (
-                                        <button
-                                            key={cat} type="button"
-                                            onClick={() => setCategoryFilters(prev => prev.includes(cat) ? prev.filter(c => c !== cat) : [...prev, cat])}
-                                            className={`px-3 py-2 text-xs text-left rounded-lg border transition-all ${categoryFilters.includes(cat) ? 'bg-blue-50 border-blue-200 text-blue-700 font-semibold' : 'bg-white hover:bg-gray-50'}`}
-                                        >
-                                            {cat}
-                                        </button>
-                                    ))}
+                                <label className="block text-xs font-bold text-gray-500 uppercase mb-2">
+                                    Difficulty Filter
+                                </label>
+                                <div className="flex gap-2">
+                                    {difficultyOptions.map(d => {
+                                        const active = codingDifficulties.includes(d);
+                                        const colors: Record<string, string> = {
+                                            easy: active ? 'bg-green-50 border-green-400 text-green-700' : 'bg-white text-gray-500',
+                                            medium: active ? 'bg-amber-50 border-amber-400 text-amber-700' : 'bg-white text-gray-500',
+                                            hard: active ? 'bg-red-50 border-red-400 text-red-700' : 'bg-white text-gray-500',
+                                        };
+                                        return (
+                                            <button
+                                                key={d} type="button"
+                                                onClick={() => toggleCodingDiff(d)}
+                                                className={`px-4 py-2 text-xs font-bold rounded-lg border transition-all capitalize ${colors[d]}`}
+                                            >
+                                                {d}
+                                            </button>
+                                        );
+                                    })}
                                 </div>
                             </div>
+                            <p className="text-xs text-gray-400">
+                                Config: {JSON.stringify({ count: Number(codingCount), difficulty: codingDifficulties })}
+                            </p>
                         </div>
-                    ) : (
-                        <div className="text-center py-4">
-                            <p className="text-sm text-gray-500">Fixed templates use a pre-defined set of questions.</p>
-                            {/* Question picker could be added here later */}
+                    )}
+                </div>
+
+                {/* ── CONVERSATIONAL SECTION ── */}
+                <div className="rounded-xl border overflow-hidden">
+                    <SectionHeader
+                        title="Conversational Section"
+                        description="LLM-powered behavioral and experience questions"
+                        color="bg-emerald-500"
+                        isOpen={convOpen}
+                        onToggle={() => setConvOpen(o => !o)}
+                    />
+                    {convOpen && (
+                        <div className="p-4 bg-gray-50 border-t space-y-3">
+                            <p className="text-xs text-gray-500">
+                                Conversational questions are generated live by Ai during the interview.
+                                Set how many rounds the session should include.
+                            </p>
+                            <div>
+                                <label className="block text-xs font-bold text-gray-500 uppercase mb-1">Number of Rounds</label>
+                                <input
+                                    type="number" min={0} value={convRounds}
+                                    onChange={e => setConvRounds(Number(e.target.value))}
+                                    placeholder="0"
+                                    className="w-32 px-3 py-2 text-gray-900 bg-white rounded-lg border text-sm"
+                                />
+                            </div>
+                            <p className="text-xs text-gray-400">
+                                Config: {JSON.stringify({ rounds: Number(convRounds) })}
+                            </p>
                         </div>
                     )}
                 </div>
             </div>
 
+            {/* ── Actions ── */}
             <div className="flex space-x-3 pt-4 border-t">
                 <button
                     type="button" onClick={onCancel}
@@ -171,7 +338,7 @@ export default function TemplateForm({ initialData, onSubmit, onCancel }: Templa
                     type="submit" disabled={loading}
                     className="flex-1 px-4 py-2 bg-blue-600 text-white rounded-xl hover:bg-blue-700 text-sm font-bold shadow-lg shadow-blue-200 transition-all active:scale-95 disabled:opacity-50"
                 >
-                    {loading ? 'Saving...' : 'Save Template'}
+                    {loading ? 'Saving...' : initialData ? 'Update Template' : 'Create Template'}
                 </button>
             </div>
         </form>

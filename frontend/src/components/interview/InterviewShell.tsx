@@ -5,6 +5,7 @@ import { useInterviewStore } from "@/store/interviewStore";
 import QuestionPanel from "./QuestionPanel";
 import AnswerPanel from "./AnswerPanel";
 import CodingQuestion from "./CodingQuestion";
+import { useCodingStore } from "@/store/codingStore";
 import Timer from "./Timer";
 import VideoFeed from "./VideoFeed";
 import { useProctoring } from "@/hooks/useProctoring";
@@ -18,6 +19,7 @@ export default function InterviewShell() {
     const isSubmitting = useInterviewStore((s) => s.isSubmitting);
     const submitAnswer = useInterviewStore((s) => s.submitAnswer);
     const interviewId = useInterviewStore((s) => s.interviewId);
+    const submitCurrentCode = useCodingStore((s) => s.submitCurrentCode);
 
     const [answerPayload, setAnswerPayload] = useState("");
     const [proctoringAlerts, setProctoringAlerts] = useState(0);
@@ -201,12 +203,16 @@ export default function InterviewShell() {
                         apiClient.post("/api/v1/proctoring/event", {
                             event_type: "TAB_SWITCH",
                             details: "Multiple tab switches detected",
-                        }, true).then(() => {
-                            submitAnswer({
-                                question_id: currentQuestion.question_id,
-                                answer_type: currentQuestion.answer_mode,
-                                answer_payload: answerPayload,
-                            });
+                        }, true).then(async () => {
+                            if (currentQuestion.type === "coding") {
+                                await submitCurrentCode(interviewId || undefined);
+                            } else {
+                                submitAnswer({
+                                    question_id: currentQuestion.question_id,
+                                    answer_type: currentQuestion.answer_mode,
+                                    answer_payload: answerPayload,
+                                });
+                            }
                         }).catch(console.error);
                     }
                 }
@@ -246,6 +252,7 @@ export default function InterviewShell() {
     const handleSubmit = () => {
         if (isSubmitting) return;
         if (currentQuestion?.type === "coding") {
+            submitCurrentCode(interviewId || undefined);
             return;
         }
         // Allow submission if there's any content (trimmed)

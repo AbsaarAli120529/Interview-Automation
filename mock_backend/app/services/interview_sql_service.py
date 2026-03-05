@@ -146,43 +146,115 @@ class InterviewSQLService:
                 status="active"
             )
             uow.interviews.create_session(new_session)
+            await uow.flush() # Needed so we can return the ID and use it for relationships
             
-            # Create InterviewSessionQuestion records from curated_questions
+            from app.db.sql.models.interview_session_section import InterviewSessionSection
+            
+            # Create the three sections
+            tech_section = InterviewSessionSection(
+                interview_session_id=new_session.id,
+                section_type="technical",
+                order_index=1,
+                status="pending"
+            )
+            coding_section = InterviewSessionSection(
+                interview_session_id=new_session.id,
+                section_type="coding",
+                order_index=2,
+                status="pending"
+            )
+            conv_section = InterviewSessionSection(
+                interview_session_id=new_session.id,
+                section_type="conversational",
+                order_index=3,
+                status="pending"
+            )
+            uow.session.add_all([tech_section, coding_section, conv_section])
+            await uow.flush()
+            
+            section_map = {
+                "technical": tech_section.id,
+                "coding": coding_section.id,
+                "conversational": conv_section.id
+            }
+
+            from app.db.sql.models.interview_session_question import InterviewSessionQuestion
+            from app.db.sql.models.question import Question
+
+            order_idx = 1
+            
+            # 1. ADD TECHNICAL AND CONVERSATIONAL QUESTIONS FROM curated_questions
             if interview.curated_questions and 'questions' in interview.curated_questions:
-                from app.db.sql.models.interview_session_question import InterviewSessionQuestion
-                from app.db.sql.models.question import Question
-                
                 questions_list = interview.curated_questions['questions']
-                for idx, q_data in enumerate(questions_list, 1):
-                    question_id = None
-                    custom_text = None
+                conv_round = 1
+                for q_data in questions_list:
+                    q_type = q_data.get('question_type', 'technical')
+                    custom_text = q_data.get('prompt') or q_data.get('question_text') or q_data.get('text', '')
                     
-                    # Check if this is a question from the question bank
-                    if 'question_id' in q_data and q_data['question_id'].startswith('conv_') == False:
-                        try:
-                            question_id = uuid.UUID(q_data['question_id'])
-                            # Verify the question exists
-                            question = await uow.session.get(Question, question_id)
-                            if not question:
+                    if q_type == 'conversational':
+                        session_question = InterviewSessionQuestion(
+                            id=uuid.uuid4(),
+                            interview_session_id=new_session.id,
+                            section_id=section_map["conversational"],
+                            question_type="conversational",
+                            conversation_round=conv_round,
+                            custom_text=custom_text,
+                            order=order_idx
+                        )
+                        uow.session.add(session_question)
+                        conv_round += 1
+                        order_idx += 1
+                    else:
+                        question_id = None
+                        if 'question_id' in q_data:
+                            try:
+                                question_id = uuid.UUID(q_data['question_id'])
+                            except:
                                 question_id = None
-                        except (ValueError, TypeError):
-                            question_id = None
+                        
+                        session_question = InterviewSessionQuestion(
+                            id=uuid.uuid4(),
+                            interview_session_id=new_session.id,
+                            section_id=section_map["technical"],
+                            question_type="technical",
+                            question_id=question_id,
+                            custom_text=custom_text if not question_id else None,
+                            order=order_idx
+                        )
+                        uow.session.add(session_question)
+                        order_idx += 1
                     
-                    # If not from question bank, use custom text
-                    if not question_id:
-                        custom_text = q_data.get('prompt') or q_data.get('question_text') or q_data.get('text', '')
-                    
-                    session_question = InterviewSessionQuestion(
-                        id=uuid.uuid4(),
-                        interview_id=interview_id,
-                        question_id=question_id,
-                        custom_text=custom_text,
-                        order=q_data.get('order', idx)
-                    )
-                    uow.session.add(session_question)
-            
-            # Automatically committed by the context wrapper closing
-            await uow.flush() # Needed so we can return the ID
+            # 2. ADD CODING AND CONVERSATIONAL QUESTIONS FROM TEMPLATE
+            if interview.template_id:
+                from app.db.sql.models.interview_template import InterviewTemplate
+                from app.services.template_engine import template_engine, CodingProblemItem, ConversationalRoundItem
+                
+                template = await uow.session.get(InterviewTemplate, interview.template_id)
+                if template:
+                    generated_items = await template_engine.generate_interview_questions(template, uow.session)
+                    for item in generated_items:
+                        if isinstance(item, CodingProblemItem):
+                            session_q = InterviewSessionQuestion(
+                                interview_session_id=new_session.id,
+                                section_id=section_map["coding"],
+                                question_type="coding",
+                                coding_problem_id=item.coding_problem_id,
+                                order=order_idx,
+                            )
+                            uow.session.add(session_q)
+                            order_idx += 1
+                        elif isinstance(item, ConversationalRoundItem):
+                            session_q = InterviewSessionQuestion(
+                                interview_session_id=new_session.id,
+                                section_id=section_map["conversational"],
+                                question_type="conversational",
+                                conversation_round=item.conversation_round,
+                                order=order_idx,
+                            )
+                            uow.session.add(session_q)
+                            order_idx += 1
+
+            await uow.flush()
 
             return {
                 "session_id": str(new_session.id),

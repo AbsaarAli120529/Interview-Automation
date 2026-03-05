@@ -62,25 +62,19 @@ class InterviewAdminSQLService:
             if not template.is_active:
                 raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Interview template is not active")
 
-            # 4. Determine final questions set
+            # 4. (Modified) We no longer generate questions here natively, since they belong
+            # to the InterviewSession, not Interview itself. But if questions are passed manually,
+            # we keep them in `questions` variable to put in `curated_questions`.
+            # We don't call template_engine here because the session doesn't exist yet.
             if questions is not None:
                 if len(questions) == 0:
                     raise HTTPException(
                         status_code=status.HTTP_400_BAD_REQUEST,
                         detail="Interview must contain at least one question."
                     )
-                # Use provided custom questions
-                final_questions = questions
+                custom_questions = questions
             else:
-                # Fallback: Generate using Template Engine
-                generated_questions = await template_engine.generate_questions_from_template(
-                    template_id=template_id,
-                    session=session
-                )
-                final_questions = [
-                    {"question_id": q.id, "custom_text": None, "original_text": q.text}
-                    for q in generated_questions
-                ]
+                custom_questions = None
 
             # 5. Build legacy CuratedQuestions JSON (mock/sync)
             resume_id = None
@@ -106,7 +100,7 @@ class InterviewAdminSQLService:
                 jd_json=jd_json,
             )
 
-            # 6. Create Interview
+            # 6. Create Interview record
             interview = Interview(
                 candidate_id=candidate_id,
                 template_id=template_id,
@@ -115,31 +109,13 @@ class InterviewAdminSQLService:
                 scheduled_at=scheduled_at,
                 curated_questions=curated_questions,
             )
-            
+
             uow.interviews.create_interview(interview)
             await uow.flush()
 
-            # 7. Insert InterviewSessionQuestion rows
-            # Normalize order server-side: Never trust client order
-            for i, q_data in enumerate(final_questions, 1):
-                # Handle both Pydantic model and dict safely
-                if isinstance(q_data, dict):
-                    q_id = q_data.get("question_id")
-                    c_text = q_data.get("custom_text")
-                else:
-                    q_id = getattr(q_data, "question_id", None)
-                    c_text = getattr(q_data, "custom_text", None)
-
-                session_q = InterviewSessionQuestion(
-                    interview_id=interview.id,
-                    question_id=q_id,
-                    custom_text=c_text,
-                    order=i,
-                )
-                session.add(session_q)
-
+            # 7. (Removed) InterviewSessionQuestion rows are now generated during session start.
             await uow.flush()
-            
+
             return interview
 
     @staticmethod
