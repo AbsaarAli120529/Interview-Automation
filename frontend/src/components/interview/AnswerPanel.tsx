@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 import { answerWebSocket } from "@/lib/answerWebSocket";
 
 interface AnswerPanelProps {
@@ -22,45 +22,34 @@ export default function AnswerPanel({
     const [transcript, setTranscript] = useState("");
     const [finalTranscript, setFinalTranscript] = useState<string | null>(null);
     const [error, setError] = useState<string | null>(null);
-
+    const timerRef = useRef<NodeJS.Timeout | null>(null);
     const mediaStreamRef = useRef<MediaStream | null>(null);
-    const recorderRef = useRef<MediaRecorder | null>(null);
+    const audioContextRef = useRef<AudioContext | null>(null);
+    const scriptProcessorRef = useRef<ScriptProcessorNode | null>(null);
     const isCleaningUpRef = useRef(false);
+    const finalSentencesRef = useRef<string[]>([]);
 
-    const cleanup = () => {
+    // Cleanup function to ensure everything is stopped cleanly
+    const cleanup = useCallback(() => {
         if (isCleaningUpRef.current) return; // Prevent double cleanup
         isCleaningUpRef.current = true;
 
-        // Stop recorder first
-        if (recorderRef.current) {
-            try {
-                if (recorderRef.current.state === "recording") {
-                    recorderRef.current.stop();
-                }
-            } catch (e) {
-                // Ignore errors if already stopped
-            }
-            // Clear recorder reference
-            recorderRef.current = null;
+        if (scriptProcessorRef.current) {
+            scriptProcessorRef.current.disconnect();
+            scriptProcessorRef.current = null;
         }
-
-        // Stop all tracks with proper state checking
+        if (audioContextRef.current) {
+            audioContextRef.current.close().catch(console.error);
+            audioContextRef.current = null;
+        }
         if (mediaStreamRef.current) {
-            try {
-                const tracks = mediaStreamRef.current.getTracks();
-                tracks.forEach((track) => {
-                    try {
-                        if (track.readyState === "live") {
-                            track.stop();
-                        }
-                    } catch (e) {
-                        // Track might already be stopped, ignore
-                    }
-                });
-            } catch (e) {
-                // Ignore errors if tracks already stopped
-            }
-            // Clear stream reference
+            mediaStreamRef.current.getTracks().forEach(track => {
+                try {
+                    track.stop();
+                } catch (e) {
+                    console.error("[AnswerPanel] Error stopping track:", e);
+                }
+            });
             mediaStreamRef.current = null;
         }
 
@@ -74,7 +63,7 @@ export default function AnswerPanel({
         setIsRecording(false);
         setError(null);
         isCleaningUpRef.current = false;
-    };
+    }, []);
 
     useEffect(() => {
         // Cleanup when component unmounts or question changes
@@ -83,18 +72,11 @@ export default function AnswerPanel({
         };
     }, [questionId]); // Re-run cleanup when question changes
 
-    // Sync transcript with value when transcript updates during recording
+    // We don't need to sync transcript to value here anymore because we do it directly in the WebSocket callbacks.
+    // This prevents the textarea from being overwritten incorrectly.
     useEffect(() => {
-        if (isRecording) {
-            // Always update the value when we receive a new transcript during recording
-            // This ensures the textarea shows what the candidate is speaking in real-time
-            // Use transcript if available, otherwise keep current value
-            const displayText = transcript || value || "";
-            if (displayText !== value) {
-                onChange(displayText);
-            }
-        }
-    }, [transcript, isRecording]); // Update when transcript changes during recording
+        // Keeping this effect empty or removing it, but we can use it for debugging if needed.
+    }, [transcript, isRecording]);
 
     const startRecording = async () => {
         if (isRecording) {
@@ -112,8 +94,18 @@ export default function AnswerPanel({
 
         try {
             setError(null);
-            setTranscript("");
-            setFinalTranscript(null);
+
+            // If there's already text in the box, preserve it so STT appends to it
+            if (value && value.trim()) {
+                finalSentencesRef.current = [value.trim()];
+                setTranscript(value.trim());
+                setFinalTranscript(value.trim());
+            } else {
+                finalSentencesRef.current = [];
+                setTranscript("");
+                setFinalTranscript(null);
+            }
+
             console.log("[AnswerPanel] Initialized state, connecting WebSocket...");
 
             // Step 1: Connect WebSocket first
@@ -126,24 +118,33 @@ export default function AnswerPanel({
                     wsReady = true;
                 },
                 onPartialTranscript: (text) => {
-                    // Update transcript state with latest partial text
-                    // Azure sends incremental updates, so we use the latest text directly
-                    console.log("[AnswerPanel] Partial transcript received:", text);
-                    setTranscript(text || "");
-                    // Always update the parent value immediately so it shows in the textarea
-                    // This ensures the candidate sees what they're speaking in real-time
-                    onChange(text || "");
+                    const partialText = text || "";
+                    const fullText = [...finalSentencesRef.current, partialText].filter(Boolean).join(" ");
+                    setTranscript(fullText);
+                    onChange(fullText);
                 },
                 onFinalTranscript: (text) => {
-                    // Final transcript replaces everything
-                    setTranscript(text);
-                    onChange(text);
-                    setFinalTranscript(text);
+                    if (!text || !text.trim()) return;
+
+                    const trimmed = text.trim();
+                    const currentJoined = finalSentencesRef.current.join(" ");
+
+                    // Prevent the endpoint from duplicating the entire string at the end of the session
+                    if (trimmed === currentJoined) return;
+
+                    finalSentencesRef.current.push(trimmed);
+                    const fullText = finalSentencesRef.current.join(" ");
+                    setTranscript(fullText);
+                    onChange(fullText);
+                    setFinalTranscript(fullText);
                 },
                 onAnswerReady: (transcriptId) => {
-                    // transcriptId is the final transcript text
-                    onChange(transcriptId);
-                    setFinalTranscript(transcriptId);
+                    // transcriptId acts as the final transcript content from the backend's compilation for the current recording session.
+                    // However, we want to preserve all paragraphs accumulated.
+                    // onFinalTranscript already processed this chunk right before this event.
+                    const fullText = finalSentencesRef.current.join(" ");
+                    onChange(fullText || transcriptId);
+                    setFinalTranscript(fullText || transcriptId);
                     setIsRecording(false);
                 },
                 onError: (error) => {
@@ -174,15 +175,15 @@ export default function AnswerPanel({
 
             // Step 2: Get audio stream after WebSocket is ready
             // Request a fresh audio stream
-            const stream = await navigator.mediaDevices.getUserMedia({ 
+            const stream = await navigator.mediaDevices.getUserMedia({
                 audio: {
                     echoCancellation: true,
                     noiseSuppression: true,
                     autoGainControl: true,
                     sampleRate: 16000, // Match Azure's expected sample rate
-                } 
+                }
             });
-            
+
             // Verify stream is active
             const audioTracks = stream.getAudioTracks();
             if (audioTracks.length === 0) {
@@ -222,69 +223,64 @@ export default function AnswerPanel({
                 throw new Error("No active audio tracks available");
             }
 
-            let mimeType = 'audio/webm;codecs=opus';
-            
-            // Check if the mime type is supported
-            if (!MediaRecorder.isTypeSupported(mimeType)) {
-                // Try other formats
-                if (MediaRecorder.isTypeSupported('audio/webm')) {
-                    mimeType = 'audio/webm';
-                } else if (MediaRecorder.isTypeSupported('audio/ogg;codecs=opus')) {
-                    mimeType = 'audio/ogg;codecs=opus';
-                } else {
-                    mimeType = ''; // Use default
-                }
-            }
+            // Step 3: Initialize AudioContext and ScriptProcessor for PCM
+            const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+            const context = new AudioContextClass();
+            audioContextRef.current = context;
 
-            let recorder: MediaRecorder;
-            try {
-                recorder = new MediaRecorder(mediaStreamRef.current, mimeType ? { mimeType } : undefined);
-                recorderRef.current = recorder;
-            } catch (recorderError) {
-                console.error("[AnswerPanel] Error creating MediaRecorder:", recorderError);
-                // Cleanup stream if recorder creation fails
-                if (mediaStreamRef.current) {
-                    mediaStreamRef.current.getTracks().forEach(track => {
-                        try {
-                            track.stop();
-                        } catch (e) {
-                            // Ignore
-                        }
-                    });
-                    mediaStreamRef.current = null;
-                }
-                throw new Error(`Failed to create MediaRecorder: ${recorderError}`);
-            }
+            const source = context.createMediaStreamSource(stream);
 
-            // Set up recorder event handlers
-            recorder.ondataavailable = async (event) => {
-                if (event.data && event.data.size > 0) {
+            // ScriptProcessor for simple PCM extraction (2048 buffer size)
+            // 2048 gives us chunks roughly every 42ms at 48kHz
+            const processor = context.createScriptProcessor(2048, 1, 1);
+            scriptProcessorRef.current = processor;
+
+            // Target Azure sample rate
+            const targetSampleRate = 16000;
+            const sourceSampleRate = context.sampleRate;
+
+            processor.onaudioprocess = (e) => {
+                // If we aren't supposed to be running, abort
+                // In React, stale closures can happen, so we just rely on scriptProcessorRef existing as proof we're active
+                if (!scriptProcessorRef.current) return;
+
+                const inputData = e.inputBuffer.getChannelData(0);
+
+                // Downsample Float32Array
+                const ratio = sourceSampleRate / targetSampleRate;
+                const newLength = Math.round(inputData.length / ratio);
+                const resampledData = new Float32Array(newLength);
+                for (let i = 0; i < newLength; i++) {
+                    resampledData[i] = inputData[Math.round(i * ratio)];
+                }
+
+                // Convert Float32Array to Int16Array
+                let l = resampledData.length;
+                const pcmData = new Int16Array(l);
+                while (l--) {
+                    const s = Math.max(-1, Math.min(1, resampledData[l]));
+                    pcmData[l] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+                }
+
+                if (pcmData.length > 0) {
                     try {
-                        const arrayBuffer = await event.data.arrayBuffer();
-                        answerWebSocket.sendAudio(arrayBuffer);
-                    } catch (e) {
-                        console.error("[AnswerPanel] Error sending audio:", e);
+                        answerWebSocket.sendAudio(pcmData.buffer);
+                    } catch (err) {
+                        console.error("[AnswerPanel] Error sending PCM chunk:", err);
                     }
                 }
             };
 
-            recorder.onerror = (event) => {
-                console.error("[AnswerPanel] MediaRecorder error:", event);
-                setError("Recording error occurred");
-                cleanup();
-            };
+            // Connect the pipeline
+            source.connect(processor);
+            processor.connect(context.destination);
 
-            recorder.onstop = () => {
-                console.log("[AnswerPanel] MediaRecorder stopped");
-            };
-
-            // Start recording
+            // Start recording state
             try {
-                recorder.start(1000); // Send chunks every second
                 setIsRecording(true);
                 onVoiceStart?.(); // Trigger voice verification
             } catch (startError) {
-                console.error("[AnswerPanel] Error starting recorder:", startError);
+                console.error("[AnswerPanel] Error starting recording state:", startError);
                 cleanup();
                 throw new Error(`Failed to start recording: ${startError}`);
             }
@@ -297,8 +293,7 @@ export default function AnswerPanel({
                 message: errorMessage,
                 error: error,
                 isRecording,
-                hasStream: !!mediaStreamRef.current,
-                hasRecorder: !!recorderRef.current
+                hasStream: !!mediaStreamRef.current
             });
             cleanup();
         }
@@ -306,15 +301,16 @@ export default function AnswerPanel({
 
     const stopRecording = () => {
         if (!isRecording) return;
-        
-        // Stop the recorder
-        if (recorderRef.current && recorderRef.current.state !== "inactive") {
-            recorderRef.current.stop();
+
+        // Cleanly disconnect pipeline
+        if (scriptProcessorRef.current) {
+            scriptProcessorRef.current.disconnect();
+            scriptProcessorRef.current = null;
         }
-        
+
         // End the answer on WebSocket
         answerWebSocket.endAnswer();
-        
+
         // Cleanup will happen in onAnswerReady or onClose
     };
 
@@ -358,13 +354,12 @@ export default function AnswerPanel({
                         }
                     }}
                     disabled={!!error}
-                    className={`px-4 py-2 rounded text-white font-medium transition-colors ${
-                        error 
-                            ? "bg-gray-400 cursor-not-allowed" 
-                            : isRecording 
-                                ? "bg-red-600 hover:bg-red-700 active:bg-red-800" 
-                                : "bg-blue-600 hover:bg-blue-700 active:bg-blue-800"
-                    }`}
+                    className={`px-4 py-2 rounded text-white font-medium transition-colors ${error
+                        ? "bg-gray-400 cursor-not-allowed"
+                        : isRecording
+                            ? "bg-red-600 hover:bg-red-700 active:bg-red-800"
+                            : "bg-blue-600 hover:bg-blue-700 active:bg-blue-800"
+                        }`}
                     type="button"
                 >
                     {isRecording ? "Stop Speaking" : "Start Speaking"}
@@ -397,7 +392,7 @@ export default function AnswerPanel({
                         }
                     }}
                     placeholder={
-                        isRecording 
+                        isRecording
                             ? "Speak your answer... Live transcription will appear here as you speak. You can also type to edit."
                             : "Click 'Start Speaking' to begin recording, or type your answer here..."
                     }

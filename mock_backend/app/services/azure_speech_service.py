@@ -138,20 +138,15 @@ class RecognitionSession:
             speech_config.speech_recognition_language = "en-US"
             speech_config.request_word_level_timestamps()
             
-            # Create push audio input stream
-            # Browser MediaRecorder sends WebM/Opus format
-            # Azure Speech SDK can handle compressed formats, but WebM needs conversion
-            # For now, use PCM format - WebM chunks will need conversion in production
-            # Note: This is a limitation - WebM audio needs to be converted to PCM
-            # For production, consider using a library like ffmpeg or pydub to convert
+            # Raw PCM 16kHz, 16-bit, Mono (Zero-Dependency)
             audio_format = speechsdk.audio.AudioStreamFormat(
-                samples_per_second=16000,  # Azure supports 8k, 16k, 24k, 32k, 44.1k, 48k
+                samples_per_second=16000,
                 bits_per_sample=16,
                 channels=1
             )
             
             self.stream = speechsdk.audio.PushAudioInputStream(stream_format=audio_format)
-            logger.info(f"[RecognitionSession] Using PCM audio format (16kHz, 16-bit, mono)")
+            logger.info(f"[RecognitionSession] Using RAW PCM 16kHz audio format")
             audio_config = speechsdk.audio.AudioConfig(stream=self.stream)
             
             # Create recognizer
@@ -170,6 +165,7 @@ class RecognitionSession:
             self.recognizer.start_continuous_recognition_async()
             self.is_running = True
             logger.info(f"[RecognitionSession] Started session {session_id}")
+            print(f"\n[STT] Started session {session_id} with compressed audio support", flush=True)
             
         except Exception as e:
             logger.error(f"Error creating recognition session: {e}")
