@@ -1,4 +1,5 @@
 import uuid
+import logging
 from typing import Optional, Dict, Any
 from datetime import datetime, timezone, timedelta
 from fastapi import HTTPException, status
@@ -7,6 +8,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.sql.unit_of_work import UnitOfWork
 from app.db.sql.enums import InterviewStatus
 from app.db.sql.models.interview_session import InterviewSession
+from app.db.sql.models.interview_session_question import InterviewSessionQuestion
+from app.db.sql.models.question import Question
+
+logger = logging.getLogger(__name__)
 
 class InterviewSQLService:
     @staticmethod
@@ -34,35 +39,41 @@ class InterviewSQLService:
                 
                 # Check verification status
                 candidate = await uow.users.get_by_id(candidate_id)
-                verification_ready = True
+                face_verified = False
+                voice_verified = False
                 if candidate and candidate.candidate_profile:
-                    verification_ready = (
-                        candidate.candidate_profile.face_verified and 
-                        candidate.candidate_profile.voice_verified
-                    )
+                    face_verified = candidate.candidate_profile.face_verified or False
+                    voice_verified = candidate.candidate_profile.voice_verified or False
                 
+                verification_ready = face_verified and voice_verified
                 can_start = time_ready and verification_ready
+                
+                # Format scheduled_at as ISO string if it exists
+                scheduled_at_str = scheduled_at.isoformat() if scheduled_at else None
                 
                 return {
                     "interview_id": str(interview_id),
                     "session_id": None,
                     "status": interview_status.value,
-                    "scheduled_at": scheduled_at,
+                    "scheduled_at": scheduled_at_str,
                     "can_start": can_start,
-                    "face_verified": candidate.candidate_profile.face_verified if candidate and candidate.candidate_profile else False,
-                    "voice_verified": candidate.candidate_profile.voice_verified if candidate and candidate.candidate_profile else False,
+                    "face_verified": face_verified,
+                    "voice_verified": voice_verified,
                 }
 
             if interview_status == InterviewStatus.IN_PROGRESS:
                 # Get the active session if one exists
                 active_session = next((s for s in interview.sessions if s.status == "active"), None)
                 session_id = str(active_session.id) if active_session else None
+                scheduled_at_str = interview.scheduled_at.isoformat() if interview.scheduled_at else None
                 return {
                     "interview_id": str(interview_id),
                     "session_id": session_id,
                     "status": interview_status.value,
-                    "scheduled_at": interview.scheduled_at,
+                    "scheduled_at": scheduled_at_str,
                     "can_start": True,
+                    "face_verified": True,  # Already verified if in progress
+                    "voice_verified": True,
                 }
             
             return None
@@ -138,9 +149,169 @@ class InterviewSQLService:
                 status="active"
             )
             uow.interviews.create_session(new_session)
+            await uow.flush() # Needed so we can return the ID and use it for relationships
             
-            # Automatically committed by the context wrapper closing
-            await uow.flush() # Needed so we can return the ID
+            # Retrieve durations from template configs
+            tech_dur = 20
+            coding_dur = 40
+            conv_dur = 15
+            
+            from app.db.sql.models.interview_template import InterviewTemplate
+            template_obj = None
+            if interview.template_id:
+                template_obj = await uow.session.get(InterviewTemplate, interview.template_id)
+                
+            if template_obj:
+                t_cfg = template_obj.technical_config or {}
+                c_cfg = template_obj.coding_config or {}
+                v_cfg = template_obj.conversational_config or {}
+                
+                # Tech duration
+                if "duration_minutes" in t_cfg and t_cfg["duration_minutes"] > 0:
+                    tech_dur = t_cfg["duration_minutes"]
+                else:
+                    logger.warning(f"Interview {interview_id}: Missing technical duration in template {template_obj.id}, using default 20m")
+                
+                # Coding duration
+                if "duration_minutes" in c_cfg and c_cfg["duration_minutes"] > 0:
+                    coding_dur = c_cfg["duration_minutes"]
+                else:
+                    logger.warning(f"Interview {interview_id}: Missing coding duration in template {template_obj.id}, using default 40m")
+                
+                # Conversational duration
+                if "duration_minutes" in v_cfg and v_cfg["duration_minutes"] > 0:
+                    conv_dur = v_cfg["duration_minutes"]
+                else:
+                    logger.warning(f"Interview {interview_id}: Missing conversational duration in template {template_obj.id}, using default 15m")
+            else:
+                logger.warning(f"Interview {interview_id}: No template found for session creation, using global defaults for durations")
+
+            from app.db.sql.models.interview_session_section import InterviewSessionSection
+            
+            # Create the three sections with extracted durations
+            tech_section = InterviewSessionSection(
+                interview_session_id=new_session.id,
+                section_type="technical",
+                order_index=1,
+                duration_minutes=tech_dur,
+                status="pending"
+            )
+            coding_section = InterviewSessionSection(
+                interview_session_id=new_session.id,
+                section_type="coding",
+                order_index=2,
+                duration_minutes=coding_dur,
+                status="pending"
+            )
+            conv_section = InterviewSessionSection(
+                interview_session_id=new_session.id,
+                section_type="conversational",
+                order_index=3,
+                duration_minutes=conv_dur,
+                status="pending"
+            )
+            uow.session.add_all([tech_section, coding_section, conv_section])
+            await uow.flush()
+            
+            section_map = {
+                "technical": tech_section.id,
+                "coding": coding_section.id,
+                "conversational": conv_section.id
+            }
+
+            from app.db.sql.models.interview_session_question import InterviewSessionQuestion
+            from app.db.sql.models.question import Question
+
+            order_idx = 1
+            
+            # 1. ADD TECHNICAL QUESTIONS FROM curated_questions
+            # NOTE: Conversational questions are NOT created here - they are generated LIVE
+            # when the candidate enters the conversational section, based on their projects
+            if interview.curated_questions:
+                # Determine which list to use: new nested structure or legacy flat structure
+                questions_list = []
+                if 'technical_section' in interview.curated_questions and 'questions' in interview.curated_questions['technical_section']:
+                    questions_list = interview.curated_questions['technical_section']['questions']
+                elif 'questions' in interview.curated_questions:
+                    questions_list = interview.curated_questions['questions']
+                
+                for q_data in questions_list:
+                    q_type = q_data.get('question_type', 'technical')
+                    # Normalize question_type: 'static' -> 'technical'
+                    if q_type == 'static':
+                        q_type = 'technical'
+                    custom_text = q_data.get('prompt') or q_data.get('question_text') or q_data.get('text', '')
+                    
+                    # Skip conversational questions - they will be generated live during interview
+                    if q_type == 'conversational':
+                        logger.info(f"[start_interview] Skipping conversational question from curated_questions - will be generated live")
+                        continue
+                    
+                    # Only process technical questions here
+                    if q_type == 'technical':
+                        # For technical questions, check if question_id exists in database
+                        question_id = None
+                        if 'question_id' in q_data:
+                            try:
+                                parsed_id = uuid.UUID(q_data['question_id'])
+                                # Verify the question actually exists in the database
+                                question_check = await uow.session.get(Question, parsed_id)
+                                if question_check:
+                                    question_id = parsed_id
+                            except (ValueError, TypeError):
+                                # Invalid UUID format, ignore
+                                question_id = None
+                        
+                        # If question_id doesn't exist, use custom_text instead
+                        # This handles LLM-generated questions that don't have database entries
+                        # The constraint requires: (question_type='technical' AND question_id IS NOT NULL) OR (custom_text IS NOT NULL)
+                        # So if question_id is None, we MUST have custom_text
+                        if not question_id:
+                            # Ensure custom_text is set - use prompt/question_text or fallback to question_id string
+                            if not custom_text:
+                                custom_text = q_data.get('prompt', '') or q_data.get('question_text', '') or q_data.get('text', '') or str(q_data.get('question_id', ''))
+                            # If still empty, use a default
+                            if not custom_text:
+                                custom_text = "Technical question"
+                        
+                        session_question = InterviewSessionQuestion(
+                            id=uuid.uuid4(),
+                            interview_session_id=new_session.id,
+                            section_id=section_map["technical"],
+                            question_type="technical",
+                            question_id=question_id,  # Will be None for LLM-generated questions
+                            custom_text=custom_text if not question_id else None,  # Use custom_text if no valid question_id
+                            order=order_idx
+                        )
+                        uow.session.add(session_question)
+                        order_idx += 1
+                    
+            # 2. ADD CODING QUESTIONS FROM TEMPLATE
+            # NOTE: Conversational questions are NOT created here - they are generated LIVE
+            # when the candidate enters the conversational section, based on their projects
+            if interview.template_id:
+                from app.db.sql.models.interview_template import InterviewTemplate
+                from app.services.template_engine import template_engine, CodingProblemItem
+                
+                template = await uow.session.get(InterviewTemplate, interview.template_id)
+                if template:
+                    generated_items = await template_engine.generate_interview_questions(template, uow.session)
+                    for item in generated_items:
+                        # Only process coding problems, skip conversational (they're generated live)
+                        if isinstance(item, CodingProblemItem):
+                            session_q = InterviewSessionQuestion(
+                                interview_session_id=new_session.id,
+                                section_id=section_map["coding"],
+                                question_type="coding",
+                                coding_problem_id=item.coding_problem_id,
+                                order=order_idx,
+                            )
+                            uow.session.add(session_q)
+                            order_idx += 1
+                        # Skip ConversationalRoundItem - these are generated live when section starts
+                        # No placeholder questions should be created
+
+            await uow.flush()
 
             return {
                 "session_id": str(new_session.id),

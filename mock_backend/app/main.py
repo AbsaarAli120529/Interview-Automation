@@ -7,19 +7,42 @@ from app.api.v1 import candidate_profile_router
 from app.api.v1 import session_router
 from app.api.v1 import verification_router
 from app.api.v1 import template_router
+from app.api.v1 import coding_router
 
 from contextlib import asynccontextmanager
 from app.db.sql.session import AsyncSessionLocal, test_database_connection
 import logging
+from pathlib import Path
+
+# Load .env file explicitly before importing services
+try:
+    from dotenv import load_dotenv
+    # Try to load .env from mock_backend directory
+    env_path = Path(__file__).resolve().parent / ".env"
+    if env_path.exists():
+        load_dotenv(env_path)
+        logging.getLogger(__name__).info(f"Loaded .env file from: {env_path}")
+    else:
+        # Try parent directory (project root)
+        env_path = Path(__file__).resolve().parent.parent / ".env"
+        if env_path.exists():
+            load_dotenv(env_path)
+            logging.getLogger(__name__).info(f"Loaded .env file from: {env_path}")
+        else:
+            logging.getLogger(__name__).warning(f".env file not found. Tried: {Path(__file__).resolve().parent / '.env'} and {Path(__file__).resolve().parent.parent / '.env'}")
+except ImportError:
+    logging.getLogger(__name__).warning("python-dotenv not installed. Install with: pip install python-dotenv")
+except Exception as e:
+    logging.getLogger(__name__).warning(f"Error loading .env file: {e}")
  
 # Configure logging
 logging.basicConfig(
     level=logging.DEBUG,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
-logger = logging.getLogger(__name__)
+logger = logging.getLogger(__name__)   
 
-@asynccontextmanager
+@asynccontextmanager  
 async def lifespan(app: FastAPI):
     # ── Step 1: Verify database connectivity ──────────────────────────────────
     logger.info("Initializing application and checking database connection...")
@@ -55,6 +78,7 @@ app.include_router(candidate_profile_router.router, prefix="/api/v1/candidate", 
 app.include_router(session_router.router, prefix="/api/v1", tags=["Session"])
 app.include_router(verification_router.router, prefix="/api/v1/verification", tags=["Verification"])
 app.include_router(template_router.router, tags=["Admin Templates"])
+app.include_router(coding_router.router, prefix="/api/v1/candidate", tags=["Coding"])
 
 @app.get("/")
 async def root():

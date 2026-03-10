@@ -4,11 +4,13 @@ import { useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { useInterviewStore } from "@/store/interviewStore";
 import InterviewShell from "@/components/interview/InterviewShell";
+import SectionSelector from "@/components/interview/SectionSelector";
 
 export default function InterviewPage() {
     const interviewId = useInterviewStore((s) => s.interviewId);
     const candidateToken = useInterviewStore((s) => s.candidateToken);
     const state = useInterviewStore((s) => s.state);
+    const currentSection = useInterviewStore((s) => s.currentSection);
     const terminationReason = useInterviewStore((s) => s.terminationReason);
     const isConnected = useInterviewStore((s) => s.isConnected);
     const error = useInterviewStore((s) => s.error);
@@ -82,6 +84,10 @@ export default function InterviewPage() {
                 Preparing your results…
             </div>
         );
+    }
+
+    if ((state === "IN_PROGRESS" || state === "READY" || state === "SECTION_COMPLETED") && !currentSection) {
+        return <SectionSelector />;
     }
 
     return <InterviewShell />;

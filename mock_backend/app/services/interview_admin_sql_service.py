@@ -33,9 +33,28 @@ class InterviewAdminSQLService:
         candidate_id: uuid.UUID, 
         assigned_by: uuid.UUID, 
         scheduled_at: datetime,
-        questions: Optional[List[Any]] = None
+        questions: Optional[List[Any]] = None,
+        draft_interview_id: Optional[uuid.UUID] = None
     ) -> Interview:
         async with UnitOfWork(session) as uow:
+            # If draft_interview_id is provided, we just update it
+            if draft_interview_id:
+                interview = await uow.interviews.get_by_id(draft_interview_id, with_for_update=True)
+                if not interview:
+                    raise HTTPException(status_code=404, detail="Draft interview not found")
+                
+                # Check if it belongs to the right candidate and template
+                if interview.candidate_id != candidate_id or interview.template_id != template_id:
+                    raise HTTPException(status_code=400, detail="Draft interview mismatch with candidate/template")
+                
+                # Update status and scheduled_at
+                interview.status = InterviewStatus.SCHEDULED
+                interview.scheduled_at = scheduled_at
+                interview.assigned_by = assigned_by # Refresh assigned_by
+                
+                await uow.flush()
+                return interview
+
             # 1. Validate candidate
             candidate = await uow.users.get_by_id(candidate_id)
             if not candidate:
@@ -50,7 +69,7 @@ class InterviewAdminSQLService:
             if active:
                 raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Candidate already has an active interview (status: scheduled or in_progress)")
 
-            # 3. Validate template (Not in uow natively, so using session directly within transaction)
+            # 3. Validate template
             result = await session.execute(
                 select(InterviewTemplate)
                 .where(InterviewTemplate.id == template_id)
@@ -59,47 +78,22 @@ class InterviewAdminSQLService:
             template = result.scalar_one_or_none()
             if not template:
                 raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Interview template not found")
-            if not template.is_active:
-                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Interview template is not active")
-
-            # 4. Determine final questions set
-            if questions is not None:
-                if len(questions) == 0:
-                    raise HTTPException(
-                        status_code=status.HTTP_400_BAD_REQUEST,
-                        detail="Interview must contain at least one question."
-                    )
-                # Use provided custom questions
-                final_questions = questions
-            else:
-                # Fallback: Generate using Template Engine
-                generated_questions = await template_engine.generate_questions_from_template(
-                    template_id=template_id,
-                    session=session
-                )
-                final_questions = [
-                    {"question_id": q.id, "custom_text": None, "original_text": q.text}
-                    for q in generated_questions
-                ]
-
-            # 5. Build legacy CuratedQuestions JSON (mock/sync)
-            resume_id = None
-            resume_text = None
-            job_description = None
-            if candidate.candidate_profile:
-                resume_id = candidate.candidate_profile.resume_id
-                resume_text = getattr(candidate.candidate_profile, "resume_text", None) or ""
-                job_description = getattr(candidate.candidate_profile, "job_description", None) or ""
-
-            curated_questions = question_generator_service.generate_curated_questions(
+            
+            # 4. Build curated questions
+            # Reuse logic from generate_curated_questions
+            profile = candidate.candidate_profile
+            curated_questions = await question_generator_service.generate_curated_questions(
+                session=session,
                 template_id=str(template_id),
                 candidate_id=str(candidate_id),
-                resume_id=resume_id,
-                resume_text=resume_text,
-                job_description=job_description,
+                resume_id=profile.resume_id if profile else None,
+                resume_text=profile.resume_text if profile else "",
+                job_description=profile.job_description if profile else "",
+                resume_json=profile.resume_json if profile else None,
+                jd_json=profile.jd_json if profile else None,
             )
 
-            # 6. Create Interview
+            # 5. Create Interview record
             interview = Interview(
                 candidate_id=candidate_id,
                 template_id=template_id,
@@ -108,32 +102,171 @@ class InterviewAdminSQLService:
                 scheduled_at=scheduled_at,
                 curated_questions=curated_questions,
             )
-            
+
             uow.interviews.create_interview(interview)
             await uow.flush()
-
-            # 7. Insert InterviewSessionQuestion rows
-            # Normalize order server-side: Never trust client order
-            for i, q_data in enumerate(final_questions, 1):
-                # Handle both Pydantic model and dict safely
-                if isinstance(q_data, dict):
-                    q_id = q_data.get("question_id")
-                    c_text = q_data.get("custom_text")
-                else:
-                    q_id = getattr(q_data, "question_id", None)
-                    c_text = getattr(q_data, "custom_text", None)
-
-                session_q = InterviewSessionQuestion(
-                    interview_id=interview.id,
-                    question_id=q_id,
-                    custom_text=c_text,
-                    order=i,
-                )
-                session.add(session_q)
-
-            await uow.flush()
-            
             return interview
+
+    @staticmethod
+    async def get_draft_interview(
+        session: AsyncSession,
+        template_id: uuid.UUID,
+        candidate_id: uuid.UUID
+    ) -> Optional[Interview]:
+        """Find an existing draft interview for this template and candidate."""
+        stmt = select(Interview).where(
+            Interview.template_id == template_id,
+            Interview.candidate_id == candidate_id,
+            Interview.status == InterviewStatus.DRAFT
+        ).order_by(Interview.created_at.desc())
+        result = await session.execute(stmt)
+        return result.scalars().first()
+
+    @staticmethod
+    async def create_draft_interview(
+        session: AsyncSession,
+        template_id: uuid.UUID,
+        candidate_id: uuid.UUID,
+        assigned_by: uuid.UUID,
+        curated_questions: Dict[str, Any]
+    ) -> Interview:
+        """Create a new interview in DRAFT status."""
+        interview = Interview(
+            candidate_id=candidate_id,
+            template_id=template_id,
+            assigned_by=assigned_by,
+            status=InterviewStatus.DRAFT,
+            scheduled_at=datetime.utcnow() + timedelta(days=365), # Far future default
+            curated_questions=curated_questions
+        )
+        session.add(interview)
+        await session.flush()
+        return interview
+
+    @staticmethod
+    async def regenerate_interview_question(
+        session: AsyncSession,
+        interview_id: uuid.UUID,
+        question_id: str,
+        comment: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Regenerate a single question in a draft interview."""
+        async with UnitOfWork(session) as uow:
+            interview = await uow.interviews.get_by_id(interview_id, with_for_update=True)
+            if not interview:
+                raise HTTPException(status_code=404, detail="Interview not found")
+            
+            if interview.status != InterviewStatus.DRAFT:
+                raise HTTPException(status_code=400, detail="Can only regenerate questions for DRAFT interviews")
+
+            curated = interview.curated_questions or {}
+            
+            # Identify section
+            section_type = None # 'technical' or 'coding'
+            target_idx = -1
+            target_q = None
+            questions_list = []
+
+            # 1. Search in technical_section
+            tech_questions = (curated.get('technical_section') or {}).get('questions', [])
+            if not tech_questions and 'questions' in curated: # Legacy flat structure
+                tech_questions = curated.get('questions', [])
+            
+            for idx, q in enumerate(tech_questions):
+                if q.get('question_id') == question_id:
+                    section_type = 'technical'
+                    target_idx = idx
+                    target_q = q
+                    questions_list = tech_questions
+                    break
+            
+            # 2. Search in coding_section if not found
+            if section_type is None:
+                coding_problems = (curated.get('coding_section') or {}).get('problems', [])
+                for idx, p in enumerate(coding_problems):
+                    if p.get('problem_id') == question_id:
+                        section_type = 'coding'
+                        target_idx = idx
+                        target_q = p
+                        questions_list = coding_problems
+                        break
+            
+            if section_type is None:
+                raise HTTPException(status_code=404, detail="Question not found in interview")
+
+            from app.services.question_generator_service import question_generator_service
+            new_q = None
+            
+            if section_type == 'technical':
+                # Determine regeneration strategy based on source
+                source = target_q.get('source', 'llm_generated')
+                template = await session.get(InterviewTemplate, interview.template_id)
+                preferred_source = "ai_generated"
+                if template and template.technical_config:
+                    preferred_source = template.technical_config.get("question_source", "ai_generated")
+
+                # Context
+                candidate = await uow.users.get_by_id(interview.candidate_id)
+                profile = candidate.candidate_profile if candidate else None
+                skills = profile.skills if profile else []
+                if profile and profile.resume_json:
+                    skills = list(set(skills + (profile.resume_json.get('skills', []))))
+
+                if source == "question_bank" and preferred_source == "question_bank":
+                    exclude_ids = [q.get('question_id') for q in questions_list]
+                    new_q = await question_generator_service._get_single_replacement_question_from_bank(
+                        session=session,
+                        exclude_ids=exclude_ids,
+                        skills=skills,
+                        difficulty=target_q.get('difficulty', 'medium')
+                    )
+                
+                if not new_q:
+                    new_q = await question_generator_service._regenerate_single_question_with_llm(
+                        existing_question=target_q,
+                        all_questions=questions_list,
+                        comment=comment,
+                        skills=skills,
+                        resume_data=profile.resume_json if profile else None,
+                        jd_data=profile.jd_json if profile else None
+                    )
+                
+                if new_q:
+                    new_q['order'] = target_q.get('order', target_idx + 1)
+                    new_q['text'] = new_q.get('prompt')
+                    questions_list[target_idx] = new_q
+                    
+                    if 'technical_section' not in interview.curated_questions:
+                        interview.curated_questions['technical_section'] = {}
+                    interview.curated_questions['technical_section']['questions'] = questions_list
+            
+            elif section_type == 'coding':
+                # Coding problem regeneration (refetch from bank)
+                template = await session.get(InterviewTemplate, interview.template_id)
+                config = template.coding_config or {}
+                difficulties = config.get("difficulty", ["medium"])
+                
+                exclude_ids = [p.get('problem_id') for p in questions_list]
+                new_q = await question_generator_service._get_single_replacement_coding_problem_from_bank(
+                    session=session,
+                    exclude_ids=exclude_ids,
+                    difficulties=difficulties
+                )
+                
+                if new_q:
+                    questions_list[target_idx] = new_q
+                    if 'coding_section' not in interview.curated_questions:
+                        interview.curated_questions['coding_section'] = {}
+                    interview.curated_questions['coding_section']['problems'] = questions_list
+
+            if new_q:
+                from sqlalchemy.orm.attributes import flag_modified
+                flag_modified(interview, "curated_questions")
+                await session.commit() # PERSIST the regeneration
+                return new_q
+            
+            raise HTTPException(status_code=500, detail="Failed to regenerate questions")
+
 
     @staticmethod
     async def list_all_interviews(session: AsyncSession) -> List[Interview]:

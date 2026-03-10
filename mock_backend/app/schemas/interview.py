@@ -18,6 +18,7 @@ class ScheduleInterviewRequest(BaseModel):
     template_id: str = Field(..., description="UUID of the interview template")
     scheduled_at: datetime = Field(..., description="Future UTC datetime for the interview")
     questions: Optional[List[InterviewSessionQuestionCreate]] = Field(None, description="Optional custom questions to override template defaults")
+    draft_interview_id: Optional[str] = Field(None, description="UUID of the draft interview to finalize")
 
 
 class RescheduleInterviewRequest(BaseModel):
@@ -47,6 +48,7 @@ class CuratedQuestionItem(BaseModel):
     question_type: Literal["static", "conversational", "coding"]
     order: int
     prompt: str
+    text: Optional[str] = None
     difficulty: Literal["easy", "medium", "hard"]
     time_limit_sec: int
 
@@ -70,12 +72,31 @@ class CuratedQuestionItem(BaseModel):
         extra = "allow"   # forward-compatible: extra keys from AI agent won't break deserialization
 
 
+class TechnicalSection(BaseModel):
+    questions: List[CuratedQuestionItem]
+
+class CodingProblemItem(BaseModel):
+    problem_id: str
+    title: str
+    difficulty: str
+    description: Optional[str] = None
+    starter_code: Optional[dict] = None
+
+class CodingSection(BaseModel):
+    problems: List[CodingProblemItem]
+
+class ConversationalSection(BaseModel):
+    rounds: int
+
 class CuratedQuestionsPayload(BaseModel):
     template_id: str
     generated_from: dict
     generated_at: datetime
     generation_method: str
-    questions: List[CuratedQuestionItem]
+    questions: Optional[List[CuratedQuestionItem]] = None
+    technical_section: Optional[TechnicalSection] = None
+    coding_section: Optional[CodingSection] = None
+    conversational_section: Optional[ConversationalSection] = None
 
 
 class InterviewTemplateResponse(BaseModel):
@@ -83,10 +104,12 @@ class InterviewTemplateResponse(BaseModel):
     title: str
     role_name: Optional[str] = None
     description: Optional[str] = None
-    is_rule_based: bool
     is_active: bool
     is_default_for_role: bool
     settings: Optional[dict] = None
+    technical_config: Optional[dict] = None
+    coding_config: Optional[dict] = None
+    conversational_config: Optional[dict] = None
     created_at: datetime
     updated_at: datetime
 
@@ -98,20 +121,24 @@ class InterviewTemplateCreate(BaseModel):
     title: str
     role_name: Optional[str] = None
     description: Optional[str] = None
-    is_rule_based: bool
     is_active: bool = True
     is_default_for_role: bool = False
     settings: Optional[dict] = None
+    technical_config: Optional[dict] = None
+    coding_config: Optional[dict] = None
+    conversational_config: Optional[dict] = None
 
 
 class InterviewTemplateUpdate(BaseModel):
     title: Optional[str] = None
     role_name: Optional[str] = None
     description: Optional[str] = None
-    is_rule_based: Optional[bool] = None
     is_active: Optional[bool] = None
     is_default_for_role: Optional[bool] = None
     settings: Optional[dict] = None
+    technical_config: Optional[dict] = None
+    coding_config: Optional[dict] = None
+    conversational_config: Optional[dict] = None
 
 
 class ScheduleInterviewResponse(BaseModel):

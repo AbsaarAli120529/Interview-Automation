@@ -52,7 +52,15 @@ async def get_active_interview(
 ) -> Optional[Dict[str, Any]]:
     # ID is guaranteed by SQL to natively be UUID type on the ORM Model
     candidate_id = current_candidate.id
-    return await InterviewSQLService.get_active_interview_for_candidate(session, candidate_id)
+    try:
+        result = await InterviewSQLService.get_active_interview_for_candidate(session, candidate_id)
+        return result
+    except Exception as e:
+        logger.error(f"Error fetching active interview for candidate {candidate_id}: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to fetch interview: {str(e)}"
+        )
 
 # ─── POST /{interview_id}/start ───────────────────────────────────────────────
 

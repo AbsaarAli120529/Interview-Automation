@@ -7,11 +7,23 @@ export type InterviewState =
     | "ANSWER_SUBMITTED"
     | "EVALUATING"
     | "COMPLETED"
-    | "TERMINATED";
+    | "TERMINATED"
+    | "SECTION_COMPLETED";
 
 export type QuestionCategory = "CONVERSATIONAL" | "STATIC" | "CODING";
 
-export type AnswerMode = "AUDIO" | "CODE";
+export type AnswerMode = "TEXT" | "AUDIO" | "CODE";
+
+export interface InterviewSection {
+    id: string;
+    section_type: "technical" | "coding" | "conversational";
+    status: "pending" | "in_progress" | "completed";
+    order_index: number;
+    duration_minutes: number;
+    is_current: boolean;
+    total_questions: number;
+    completed_questions: number;
+}
 
 export type Difficulty = "EASY" | "MEDIUM" | "HARD";
 
@@ -25,9 +37,11 @@ export type ProctoringAction = "FLAG" | "TERMINATE" | "IGNORE";
 
 export interface QuestionResponse {
     question_id: string;
+    session_question_id?: string;
+    type?: string;
     question_text?: string;
     prompt?: string; // fallback
-    answer_mode: 'TEXT' | 'CODE' | 'AUDIO';
+    answer_mode: AnswerMode;
     time_limit_sec: number;
     question_number: number;
     total_questions: number;

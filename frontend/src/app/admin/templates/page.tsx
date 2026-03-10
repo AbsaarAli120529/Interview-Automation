@@ -82,7 +82,6 @@ export default function TemplatesPage() {
                         <tr>
                             <th className="px-6 py-4 text-xs font-bold text-gray-500 uppercase tracking-wider">Template</th>
                             <th className="px-6 py-4 text-xs font-bold text-gray-500 uppercase tracking-wider">Role</th>
-                            <th className="px-6 py-4 text-xs font-bold text-gray-500 uppercase tracking-wider">Type</th>
                             <th className="px-6 py-4 text-xs font-bold text-gray-500 uppercase tracking-wider text-center">Default</th>
                             <th className="px-6 py-4 text-xs font-bold text-gray-500 uppercase tracking-wider text-center">Status</th>
                             <th className="px-6 py-4 text-xs font-bold text-gray-500 uppercase tracking-wider text-right">Actions</th>
@@ -102,11 +101,6 @@ export default function TemplatesPage() {
                                 <td className="px-6 py-4">
                                     <span className="text-sm text-gray-600 bg-gray-100 px-2 py-1 rounded-md font-medium">
                                         {t.role_name || 'Generic'}
-                                    </span>
-                                </td>
-                                <td className="px-6 py-4">
-                                    <span className={`text-[10px] font-bold uppercase tracking-widest px-2 py-1 rounded-full ${t.is_rule_based ? 'bg-purple-50 text-purple-600 border border-purple-100' : 'bg-blue-50 text-blue-600 border border-blue-100'}`}>
-                                        {t.is_rule_based ? 'Rule-Based' : 'Fixed'}
                                     </span>
                                 </td>
                                 <td className="px-6 py-4 text-center">
@@ -146,14 +140,14 @@ export default function TemplatesPage() {
 
             {modal.open && (
                 <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4 z-50 animate-in fade-in duration-200">
-                    <div className="bg-white rounded-2xl w-full max-w-xl shadow-2xl overflow-hidden animate-in zoom-in-95 duration-200">
-                        <div className="bg-gray-50 px-6 py-4 border-b flex justify-between items-center">
+                    <div className="bg-white rounded-2xl w-full max-w-xl shadow-2xl flex flex-col max-h-[90vh] overflow-hidden animate-in zoom-in-95 duration-200">
+                        <div className="bg-gray-50 px-6 py-4 border-b flex justify-between items-center shrink-0">
                             <h2 className="text-lg font-bold text-gray-900">{modal.data ? 'Edit Template' : 'New Template'}</h2>
                             <button onClick={() => setModal({ open: false })} className="text-gray-400 hover:text-gray-600 transition-colors">
                                 <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
                             </button>
                         </div>
-                        <div className="p-6">
+                        <div className="p-6 overflow-y-auto">
                             <TemplateForm
                                 initialData={modal.data}
                                 onSubmit={handleFormSubmit}

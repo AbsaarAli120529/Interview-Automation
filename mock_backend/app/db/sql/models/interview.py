@@ -27,6 +27,7 @@ class Interview(Base):
     
     overall_score: Mapped[float] = mapped_column(Float, nullable=True)
     feedback: Mapped[str] = mapped_column(String, nullable=True)
+    report_json: Mapped[dict] = mapped_column(JSON, nullable=True)
     
     curated_questions: Mapped[list] = mapped_column(JSON, nullable=True)
 
@@ -37,4 +38,3 @@ class Interview(Base):
     assigner: Mapped["User"] = relationship("User", foreign_keys=[assigned_by])
     template: Mapped["InterviewTemplate"] = relationship("InterviewTemplate", back_populates="interviews")
     sessions: Mapped[list["InterviewSession"]] = relationship("InterviewSession", back_populates="interview", cascade="all, delete-orphan")
-    session_questions: Mapped[list["InterviewSessionQuestion"]] = relationship("InterviewSessionQuestion", back_populates="interview", cascade="all, delete-orphan")

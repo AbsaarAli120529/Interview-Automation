@@ -7,6 +7,7 @@ from app.db.sql.session import engine, AsyncSessionLocal
 from seeds.seed_admin import seed_admin
 from seeds.seed_templates import seed_templates
 from seeds.seed_questions import seed_question_bank
+from seeds.seed_coding_problems import seed_coding_problems
 
 # Configure logging for standalone execution
 logging.basicConfig(
@@ -30,6 +31,9 @@ async def run_all_seeds():
             
             # 3. Question bank seeding
             await seed_question_bank(session)
+            
+            # 4. Coding problems seeding
+            await seed_coding_problems(session)
             
             # Commit all changes
             await session.commit()

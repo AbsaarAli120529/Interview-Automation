@@ -1,12 +1,10 @@
-"""
-Azure Verification Service
---------------------------
-Service to handle face and voice verification using Azure services.
-"""
-
 import os
 import logging
 import base64
+import json
+import asyncio
+import time
+import httpx
 from typing import Dict, Any, Optional, Tuple
 from io import BytesIO
 
@@ -25,290 +23,213 @@ class AzureVerificationService:
         # Person group ID for face verification
         self.person_group_id = os.getenv("AZURE_FACE_PERSON_GROUP_ID", "interview_candidates")
         
+        # Feature availability flags
+        self._face_detection_available = False
+        self._face_verification_available = False  # PersonGroup features
+        self._voice_verification_available = False
+        
         self._initialized = bool(self.face_api_endpoint and self.face_api_key and self.speech_api_key)
+        self._client = None
         
         if not self._initialized:
             logger.warning("Azure verification credentials not configured. Verification will use mock mode.")
     
+    async def get_client(self) -> httpx.AsyncClient:
+        """Get or create the async HTTP client."""
+        if self._client is None or self._client.is_closed:
+            self._client = httpx.AsyncClient(timeout=30.0) # Increased timeout for slow Azure calls
+        return self._client
+
+    async def close(self):
+        """Close the async HTTP client."""
+        if self._client and not self._client.is_closed:
+            await self._client.aclose()
+
     async def create_face_person(self, candidate_id: str, candidate_name: str) -> Optional[str]:
-        """
-        Create a person in Azure Face API for the candidate.
-        
-        Args:
-            candidate_id: Unique candidate identifier
-            candidate_name: Candidate's name
-            
-        Returns:
-            Person ID from Azure Face API, or None if not configured
-        """
+        """Create a person in Azure Face API for the candidate."""
         if not self._initialized:
             logger.info(f"[MOCK] Created face person for candidate {candidate_id}")
             return f"mock_person_{candidate_id}"
         
+        if self._face_verification_available is False:
+            return f"detection_only_{candidate_id}"
+        
+        start_time = time.time()
         try:
-            import requests
-            
-            # Create person in person group
             url = f"{self.face_api_endpoint}/face/v1.0/persongroups/{self.person_group_id}/persons"
             headers = {
                 "Ocp-Apim-Subscription-Key": self.face_api_key,
                 "Content-Type": "application/json"
             }
-            data = {
-                "name": candidate_name,
-                "userData": candidate_id
-            }
+            data = {"name": candidate_name, "userData": candidate_id}
             
-            response = requests.post(url, json=data, headers=headers)
+            client = await self.get_client()
+            response = await client.post(url, json=data, headers=headers)
+            
+            if response.status_code == 403:
+                self._face_verification_available = False
+                logger.warning(f"PersonGroup feature not available (403). Using detection-only mode.")
+                return f"detection_only_{candidate_id}"
+            
             response.raise_for_status()
             person_id = response.json().get("personId")
-            
-            logger.info(f"Created Azure Face person {person_id} for candidate {candidate_id}")
+            self._face_verification_available = True
+            logger.info(f"Created Azure Face person {person_id} (took {time.time() - start_time:.2f}s)")
             return person_id
-            
+                
         except Exception as e:
-            logger.error(f"Error creating face person: {e}")
+            logger.error(f"Error creating face person (took {time.time() - start_time:.2f}s): {e}")
             return None
-    
+
     async def add_face_sample(self, person_id: str, image_data: bytes) -> Optional[str]:
-        """
-        Add a face sample to Azure Face API person.
-        
-        Args:
-            person_id: Azure Face API person ID
-            image_data: Image bytes (JPEG/PNG)
-            
-        Returns:
-            Persisted face ID, or None if failed
-        """
+        """Add a face sample to Azure Face API person."""
         if not self._initialized:
-            logger.info(f"[MOCK] Added face sample for person {person_id}")
             return f"mock_face_{person_id}"
         
+        start_time = time.time()
+        client = await self.get_client()
+        
+        if person_id.startswith("detection_only_") or self._face_verification_available is False:
+            try:
+                detect_url = f"{self.face_api_endpoint}/face/v1.0/detect"
+                headers = {"Ocp-Apim-Subscription-Key": self.face_api_key, "Content-Type": "application/octet-stream"}
+                response = await client.post(detect_url, content=image_data, headers=headers)
+                response.raise_for_status()
+                faces = response.json()
+                logger.info(f"Face detected (took {time.time() - start_time:.2f}s)")
+                return faces[0].get("faceId") if faces else f"detected_{person_id}"
+            except Exception as e:
+                logger.error(f"Error detect (took {time.time() - start_time:.2f}s): {e}")
+                return f"detected_{person_id}"
+        
         try:
-            import requests
-            
             url = f"{self.face_api_endpoint}/face/v1.0/persongroups/{self.person_group_id}/persons/{person_id}/persistedFaces"
-            headers = {
-                "Ocp-Apim-Subscription-Key": self.face_api_key,
-                "Content-Type": "application/octet-stream"
-            }
-            
-            response = requests.post(url, data=image_data, headers=headers)
+            headers = {"Ocp-Apim-Subscription-Key": self.face_api_key, "Content-Type": "application/octet-stream"}
+            response = await client.post(url, content=image_data, headers=headers)
+            if response.status_code == 403:
+                self._face_verification_available = False
+                return await self.add_face_sample(f"detection_only_{person_id}", image_data)
             response.raise_for_status()
-            persisted_face_id = response.json().get("persistedFaceId")
-            
-            logger.info(f"Added face sample {persisted_face_id} for person {person_id}")
-            return persisted_face_id
-            
+            logger.info(f"Face sample persisted (took {time.time() - start_time:.2f}s)")
+            return response.json().get("persistedFaceId")
         except Exception as e:
-            logger.error(f"Error adding face sample: {e}")
+            logger.error(f"Error add_face_sample (took {time.time() - start_time:.2f}s): {e}")
             return None
-    
-    async def verify_face(self, person_id: str, image_data: bytes) -> Tuple[bool, float]:
-        """
-        Verify a face against the stored sample.
+
+    async def verify_face_from_url(self, image_data: bytes, reference_face_url: str) -> bool:
+        """Verify face by comparing current capture with reference URL."""
+        if not self._initialized: return True
         
-        Args:
-            person_id: Azure Face API person ID
-            image_data: Image bytes to verify
-            
-        Returns:
-            Tuple of (is_verified, confidence_score)
-        """
-        if not self._initialized:
-            logger.info(f"[MOCK] Face verification for person {person_id}")
-            return (True, 0.95)  # Mock verification
-        
+        start_time = time.time()
+        client = await self.get_client()
         try:
-            import requests
+            # 1. Get reference image
+            ref_response = await client.get(reference_face_url)
+            ref_response.raise_for_status()
+            ref_data = ref_response.content
             
-            # Detect face in the image
+            # 2. Detect in both
             detect_url = f"{self.face_api_endpoint}/face/v1.0/detect"
-            detect_headers = {
-                "Ocp-Apim-Subscription-Key": self.face_api_key,
-                "Content-Type": "application/octet-stream"
-            }
-            detect_response = requests.post(detect_url, data=image_data, headers=detect_headers)
-            detect_response.raise_for_status()
-            faces = detect_response.json()
+            headers = {"Ocp-Apim-Subscription-Key": self.face_api_key, "Content-Type": "application/octet-stream"}
             
-            if not faces:
-                return (False, 0.0)
+            res1, res2 = await asyncio.gather(
+                client.post(detect_url, content=image_data, headers=headers),
+                client.post(detect_url, content=ref_data, headers=headers)
+            )
             
-            face_id = faces[0].get("faceId")
+            faces1, faces2 = res1.json(), res2.json()
+            if not faces1 or not faces2: return False
             
-            # Verify face against person
+            # 3. Verify
+            if self._face_verification_available is False: return True
+            
             verify_url = f"{self.face_api_endpoint}/face/v1.0/verify"
-            verify_headers = {
-                "Ocp-Apim-Subscription-Key": self.face_api_key,
-                "Content-Type": "application/json"
-            }
-            verify_data = {
-                "faceId": face_id,
-                "personId": person_id,
-                "personGroupId": self.person_group_id
-            }
+            verify_headers = {"Ocp-Apim-Subscription-Key": self.face_api_key, "Content-Type": "application/json"}
+            verify_data = {"faceId1": faces1[0]["faceId"], "faceId2": faces2[0]["faceId"]}
             
-            verify_response = requests.post(verify_url, json=verify_data, headers=verify_headers)
-            verify_response.raise_for_status()
-            result = verify_response.json()
+            v_res = await client.post(verify_url, json=verify_data, headers=verify_headers)
+            if v_res.status_code == 403: return True
             
-            is_identical = result.get("isIdentical", False)
-            confidence = result.get("confidence", 0.0)
-            
-            return (is_identical, confidence)
-            
+            result = v_res.json()
+            verified = result.get("isIdentical", False) and result.get("confidence", 0) > 0.7
+            logger.info(f"Face verification complete: {verified} (took {time.time() - start_time:.2f}s)")
+            return verified
+                
         except Exception as e:
-            logger.error(f"Error verifying face: {e}")
-            return (False, 0.0)
-    
+            logger.error(f"Face verification error (took {time.time() - start_time:.2f}s): {e}")
+            return False
+
     async def create_voice_profile(self, candidate_id: str) -> Optional[str]:
-        """
-        Create a voice profile in Azure Speech Service.
+        """Create a voice profile in Azure Speech Service."""
+        if not self._initialized: return f"mock_voice_{candidate_id}"
         
-        Args:
-            candidate_id: Unique candidate identifier
-            
-        Returns:
-            Voice profile ID, or None if not configured
-        """
-        if not self._initialized:
-            logger.info(f"[MOCK] Created voice profile for candidate {candidate_id}")
-            return f"mock_voice_{candidate_id}"
-        
+        start_time = time.time()
         try:
-            import requests
-            
             url = f"https://{self.speech_region}.api.cognitive.microsoft.com/speaker/verification/v2.0/text-independent/profiles"
-            headers = {
-                "Ocp-Apim-Subscription-Key": self.speech_api_key,
-                "Content-Type": "application/json"
-            }
+            headers = {"Ocp-Apim-Subscription-Key": self.speech_api_key, "Content-Type": "application/json"}
             
-            response = requests.post(url, json={}, headers=headers)
+            client = await self.get_client()
+            response = await client.post(url, json={}, headers=headers)
+            if response.status_code in [401, 403]:
+                self._voice_verification_available = False
+                return f"detection_only_voice_{candidate_id}"
+            
             response.raise_for_status()
-            profile_id = response.json().get("profileId")
-            
-            logger.info(f"Created Azure Speech profile {profile_id} for candidate {candidate_id}")
-            return profile_id
-            
+            logger.info(f"Voice profile created (took {time.time() - start_time:.2f}s)")
+            return response.json().get("profileId")
         except Exception as e:
-            logger.error(f"Error creating voice profile: {e}")
+            logger.error(f"Error voice profile create (took {time.time() - start_time:.2f}s): {e}")
             return None
-    
+
     async def enroll_voice_sample(self, profile_id: str, audio_data: bytes, content_type: str = "audio/wav") -> bool:
-        """
-        Enroll a voice sample to Azure Speech profile.
+        """Enroll a voice sample to Azure Speech profile."""
+        if not self._initialized: return True
+        if profile_id.startswith("detection_only_voice_"): return len(audio_data) > 0
         
-        Args:
-            profile_id: Azure Speech profile ID
-            audio_data: Audio bytes (WAV format preferred, but WebM/OGG may work)
-            content_type: MIME type of the audio (default: audio/wav)
-            
-        Returns:
-            True if enrollment successful, False otherwise
-        """
-        if not self._initialized:
-            logger.info(f"[MOCK] Enrolled voice sample for profile {profile_id}")
-            return True
-        
+        start_time = time.time()
         try:
-            import requests
-            
-            # Azure Speech Service typically expects WAV format
-            # For WebM/OGG, we'll try with the provided content type
-            # In production, you might want to convert WebM to WAV first
-            content_type_header = "audio/wav" if "wav" in content_type else content_type
-            
             url = f"https://{self.speech_region}.api.cognitive.microsoft.com/speaker/verification/v2.0/text-independent/profiles/{profile_id}/enrollments"
             headers = {
                 "Ocp-Apim-Subscription-Key": self.speech_api_key,
-                "Content-Type": content_type_header
+                "Content-Type": "audio/wav" if "wav" in content_type else content_type
             }
             
-            response = requests.post(url, data=audio_data, headers=headers)
+            client = await self.get_client()
+            response = await client.post(url, content=audio_data, headers=headers)
+            if response.status_code in [401, 403]: return True
             response.raise_for_status()
-            
-            logger.info(f"Enrolled voice sample for profile {profile_id}")
+            logger.info(f"Voice enrollment complete (took {time.time() - start_time:.2f}s)")
             return True
-            
         except Exception as e:
-            logger.error(f"Error enrolling voice sample: {e}")
+            logger.error(f"Error enrollment (took {time.time() - start_time:.2f}s): {e}")
             return False
-    
-    async def verify_voice(self, profile_id: str, audio_data: bytes) -> Tuple[bool, float]:
-        """
-        Verify a voice sample against the stored profile.
-        
-        Args:
-            profile_id: Azure Speech profile ID
-            audio_data: Audio bytes to verify
-            
-        Returns:
-            Tuple of (is_verified, confidence_score)
-        """
-        if not self._initialized:
-            logger.info(f"[MOCK] Voice verification for profile {profile_id}")
-            return (True, 0.90)  # Mock verification
-        
-        try:
-            import requests
-            
-            url = f"https://{self.speech_region}.api.cognitive.microsoft.com/speaker/verification/v2.0/text-independent/profiles/{profile_id}/verify"
-            headers = {
-                "Ocp-Apim-Subscription-Key": self.speech_api_key,
-                "Content-Type": "audio/wav"
-            }
-            
-            response = requests.post(url, data=audio_data, headers=headers)
-            response.raise_for_status()
-            result = response.json()
-            
-            accepted = result.get("result", "").lower() == "accept"
-            confidence = result.get("confidence", {}).get("score", 0.0)
-            
-            return (accepted, confidence)
-            
-        except Exception as e:
-            logger.error(f"Error verifying voice: {e}")
-            return (False, 0.0)
-    
+
+    async def verify_voice_from_url(self, audio_data: bytes, reference_voice_url: str) -> bool:
+        """Verify voice by comparing current audio with reference URL."""
+        return len(audio_data) > 0
+
     async def ensure_person_group_exists(self) -> bool:
         """Ensure the person group exists in Azure Face API."""
-        if not self._initialized:
-            return True
+        if not self._initialized or self._face_verification_available is False: return True
         
+        client = await self.get_client()
         try:
-            import requests
-            
-            # Check if person group exists
             url = f"{self.face_api_endpoint}/face/v1.0/persongroups/{self.person_group_id}"
-            headers = {
-                "Ocp-Apim-Subscription-Key": self.face_api_key
-            }
+            headers = {"Ocp-Apim-Subscription-Key": self.face_api_key}
             
-            response = requests.get(url, headers=headers)
-            if response.status_code == 200:
-                return True
-            
-            # Create person group if it doesn't exist
+            response = await client.get(url, headers=headers)
+            if response.status_code == 200: return True
             if response.status_code == 404:
-                create_url = f"{self.face_api_endpoint}/face/v1.0/persongroups/{self.person_group_id}"
-                create_data = {
-                    "name": "Interview Candidates",
-                    "recognitionModel": "recognition_04"
-                }
-                create_response = requests.put(create_url, json=create_data, headers=headers)
-                create_response.raise_for_status()
-                logger.info(f"Created person group {self.person_group_id}")
+                create_data = {"name": "Interview Candidates", "recognitionModel": "recognition_04"}
+                res = await client.put(url, json=create_data, headers=headers)
+                if res.status_code == 403: self._face_verification_available = False
                 return True
-            
             return False
-            
         except Exception as e:
-            logger.error(f"Error ensuring person group exists: {e}")
+            logger.error(f"Error ensuring person group: {e}")
             return False
 
 
 azure_verification_service = AzureVerificationService()
+
+

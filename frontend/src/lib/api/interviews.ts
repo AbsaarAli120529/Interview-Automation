@@ -13,6 +13,7 @@ import {
     CandidateInterview,
     SchedulingApiError,
     TemplatePreviewResponse,
+    TemplatePreviewQuestion,
 } from '@/types/interview';
 
 // Re-export so consumers can import from this module
@@ -59,15 +60,17 @@ async function parseError(res: Response): Promise<SchedulingApiError> {
 // ─── Templates ───────────────────────────────────────────────────────────────
 
 export async function previewTemplate(
-    templateId: string
+    templateId: string,
+    candidateId?: string
 ): Promise<TemplatePreviewResponse> {
-    const res = await fetch(
-        `${BASE_URL}/api/v1/admin/interviews/templates/${templateId}/preview`,
-        {
-            method: 'POST',
-            headers: authHeaders(),
-        }
-    );
+    const url = new URL(`${BASE_URL}/api/v1/admin/interviews/templates/${templateId}/preview`);
+    if (candidateId) {
+        url.searchParams.append('candidate_id', candidateId);
+    }
+    const res = await fetch(url.toString(), {
+        method: 'POST',
+        headers: authHeaders(),
+    });
     if (!res.ok) throw await parseError(res);
     return res.json();
 }
@@ -154,6 +157,51 @@ export async function fetchInterviewSummary(): Promise<InterviewSummaryItem[]> {
     return res.json();
 }
 
+// ─── Interview Report ────────────────────────────────────────────────────────────
+
+export interface InterviewReport {
+    interview_id: string;
+    session_id: string;
+    candidate_id: string;
+    candidate_name: string;
+    interview_date: string | null;
+    completed_at: string | null;
+    overall_score: number;
+    max_score: number;
+    min_score: number;
+    total_questions: number;
+    answered_questions: number;
+    recommendation: string;
+    recommendation_reason: string;
+    strengths: string[];
+    weaknesses: string[];
+    question_breakdown: Array<{
+        question_id: string;
+        question_text: string;
+        question_type: string;
+        answer_text: string;
+        score: number | null;
+        feedback: string | null;
+        strengths: string[];
+        weaknesses: string[];
+        submitted_at: string | null;
+    }>;
+    proctoring_summary: {
+        face_verification_alerts: number;
+        voice_verification_alerts: number;
+        termination_reason: string | null;
+    };
+    generated_at: string;
+}
+
+export async function fetchInterviewReport(interviewId: string): Promise<InterviewReport> {
+    const res = await fetch(`${BASE_URL}/api/v1/dashboard/interviews/${interviewId}/report`, {
+        headers: authHeaders(),
+    });
+    if (!res.ok) throw await parseError(res);
+    return res.json();
+}
+
 // ─── Candidate: active interview ──────────────────────────────────────────────
 
 export interface ActiveInterviewResponse {
@@ -167,12 +215,25 @@ export interface ActiveInterviewResponse {
 }
 
 export async function fetchActiveInterview(): Promise<ActiveInterviewResponse | null> {
-    const res = await fetch(`${BASE_URL}/api/v1/candidate/interviews/active`, {
-        headers: authHeaders(),
-    });
-    if (!res.ok) throw await parseError(res);
-    const data = await res.json();
-    return data ?? null;
+    try {
+        const res = await fetch(`${BASE_URL}/api/v1/candidate/interviews/active`, {
+            headers: authHeaders(),
+        });
+        if (res.status === 404) return null;  // No interview found is OK
+        if (!res.ok) throw await parseError(res);
+        const data = await res.json();
+        // Handle null response from backend
+        if (data === null || (typeof data === 'object' && Object.keys(data).length === 0)) {
+            return null;
+        }
+        return data;
+    } catch (error) {
+        // Network errors or other fetch errors
+        if (error instanceof TypeError && error.message.includes('fetch')) {
+            throw { status: 0, detail: 'Failed to connect to server. Please check your connection.' } as SchedulingApiError;
+        }
+        throw error;
+    }
 }
 
 // ─── Candidate: start interview ───────────────────────────────────────────────
@@ -191,6 +252,57 @@ export async function startInterview(
         {
             method: 'POST',
             headers: authHeaders(),
+        }
+    );
+    if (!res.ok) throw await parseError(res);
+    return res.json();
+}
+
+// ─── Interview Questions Management ───────────────────────────────────────────────
+
+export interface InterviewQuestion {
+    question_id: string;
+    question_type: 'static' | 'conversational' | 'coding';
+    order: number;
+    prompt: string;
+    difficulty: 'easy' | 'medium' | 'hard';
+    time_limit_sec: number;
+    evaluation_mode?: string;
+    source?: string;
+    [key: string]: any; // Allow extra fields
+}
+
+export interface InterviewQuestionsResponse {
+    questions: InterviewQuestion[];
+}
+
+export async function updateInterviewQuestions(
+    interviewId: string,
+    questions: InterviewQuestion[]
+): Promise<InterviewQuestionsResponse> {
+    const res = await fetch(
+        `${BASE_URL}/api/v1/admin/interviews/${interviewId}/questions`,
+        {
+            method: 'PUT',
+            headers: authHeaders(),
+            body: JSON.stringify(questions),
+        }
+    );
+    if (!res.ok) throw await parseError(res);
+    return res.json();
+}
+
+export async function regenerateQuestion(
+    interviewId: string,
+    questionId: string,
+    comment?: string
+): Promise<TemplatePreviewQuestion> {
+    const res = await fetch(
+        `${BASE_URL}/api/v1/admin/interviews/${interviewId}/questions/${questionId}/regenerate`,
+        {
+            method: 'POST',
+            headers: authHeaders(),
+            body: JSON.stringify({ comment }),
         }
     );
     if (!res.ok) throw await parseError(res);

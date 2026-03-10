@@ -15,6 +15,7 @@ import { CandidateResponse } from '@/types/api';
 import ScheduleInterviewModal from '@/components/admin/ScheduleInterviewModal';
 import CancelInterviewDialog from '@/components/admin/CancelInterviewDialog';
 import ResumePreviewModal from '@/components/admin/ResumePreviewModal';
+import InterviewReportModal from '@/components/admin/InterviewReportModal';
 import { Toast, useToast } from '@/components/ui/Toast';
 
 // --- Types ----------------------------------------------------------------------
@@ -129,6 +130,7 @@ export default function AdminDashboardPage() {
     // -- Cancel ------------------------------------------------------------------
     const [cancelTarget, setCancelTarget] = useState<CandidateRow | null>(null);
     const [summaryTarget, setSummaryTarget] = useState<CandidateRow | null>(null);
+    const [reportTarget, setReportTarget] = useState<{ interviewId: string; candidateName: string } | null>(null);
     const [previewTarget, setPreviewTarget] = useState<CandidateRow | null>(null);
     const [cancelLoading, setCancelLoading] = useState(false);
 
@@ -143,17 +145,20 @@ export default function AdminDashboardPage() {
         fetchStats();
     }, [_hasHydrated, isAuthenticated, user, router]);
 
-    useEffect(() => {
-        if (isAuthenticated) {
-            fetchCandidates();
-        }
-    }, [isAuthenticated, limit, offset, search, sortBy, order]);
 
     const fetchStats = async () => {
         setStatsLoading(true);
         try {
             const baseUrl = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8000';
-            const res = await fetch(`${baseUrl}/api/v1/dashboard/stats`);
+            const currentToken = useAuthStore.getState().token;
+            const authHeader: Record<string, string> = currentToken ? { 'Authorization': `Bearer ${currentToken}` } : {};
+
+            const res = await fetch(`${baseUrl}/api/v1/dashboard/stats`, {
+                headers: {
+                    ...authHeader,
+                    'Content-Type': 'application/json'
+                }
+            });
             if (res.ok) {
                 setStats(await res.json());
             } else {
@@ -161,6 +166,7 @@ export default function AdminDashboardPage() {
             }
         } catch (err) {
             console.error(err);
+            setStats({ total_interviews: 0, completed: 0, pending: 0, flagged: 0 });
         } finally {
             setStatsLoading(false);
         }
@@ -230,6 +236,23 @@ export default function AdminDashboardPage() {
         fetchCandidates();
     }, [fetchCandidates]);
 
+    useEffect(() => {
+        if (isAuthenticated) {
+            fetchCandidates();
+        }
+    }, [isAuthenticated, limit, offset, search, sortBy, order, fetchCandidates]);
+
+    // Automatically poll for updates if any candidates are currently being parsed
+    useEffect(() => {
+        const hasPending = candidates.some(c => c.parse_status === 'pending');
+        if (hasPending) {
+            const interval = setInterval(() => {
+                fetchData();
+            }, 5000); // Poll every 5 seconds (fetches both stats and candidates)
+            return () => clearInterval(interval);
+        }
+    }, [candidates, fetchData]);
+
     // --- Handlers ---------------------------------------------------------------
 
     const handleLogout = () => { logout(); router.push('/login/admin'); };
@@ -258,7 +281,7 @@ export default function AdminDashboardPage() {
         }
     };
 
-    const onScheduleSuccess = () => {
+    const onScheduleSuccess = (interviewId?: string) => {
         setScheduleTarget(null);
         toast.success(scheduleMode === 'schedule' ? 'Interview scheduled!' : 'Interview rescheduled!');
         fetchData();
@@ -622,9 +645,9 @@ export default function AdminDashboardPage() {
                                                                 Cancel
                                                             </button>
                                                         )}
-                                                        {ivStatus === 'completed' && s?.overall_score != null && (
+                                                        {ivStatus === 'completed' && s?.interview_id && (
                                                             <button
-                                                                onClick={() => setSummaryTarget(candidate)}
+                                                                onClick={() => setReportTarget({ interviewId: s.interview_id, candidateName: candidate.username })}
                                                                 className="px-3 py-1.5 bg-purple-50 text-purple-700 rounded-md text-xs font-semibold hover:bg-purple-100 transition-colors"
                                                             >
                                                                 View Results
@@ -714,6 +737,17 @@ export default function AdminDashboardPage() {
                 <ResumePreviewModal
                     candidate={previewTarget}
                     onClose={() => setPreviewTarget(null)}
+                />
+            )}
+
+
+            {/* Interview Report Modal */}
+            {reportTarget && (
+                <InterviewReportModal
+                    interviewId={reportTarget.interviewId}
+                    candidateName={reportTarget.candidateName}
+                    onClose={() => setReportTarget(null)}
+                    onAuthError={handleAuthError}
                 />
             )}
 

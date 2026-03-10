@@ -41,10 +41,14 @@ class InterviewRepository(BaseRepository[Interview]):
         return session_obj
 
     async def get_active_or_inprogress_for_candidate(self, candidate_id: uuid.UUID) -> Optional[Interview]:
+        # Use defer() to avoid loading current_section_id if column doesn't exist yet
+        from sqlalchemy.orm import defer
         stmt = select(Interview).where(
             Interview.candidate_id == candidate_id,
             Interview.status.in_([InterviewStatus.SCHEDULED, InterviewStatus.IN_PROGRESS])
-        ).options(selectinload(Interview.sessions))
+        ).options(
+            selectinload(Interview.sessions).defer(InterviewSession.current_section_id)
+        )
         result = await self.session.execute(stmt)
         return result.scalars().first()
 
