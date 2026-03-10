@@ -286,15 +286,18 @@ class InterviewSQLService:
                         uow.session.add(session_question)
                         order_idx += 1
                     
-            # 2. ADD CODING AND CONVERSATIONAL QUESTIONS FROM TEMPLATE
+            # 2. ADD CODING QUESTIONS FROM TEMPLATE
+            # NOTE: Conversational questions are NOT created here - they are generated LIVE
+            # when the candidate enters the conversational section, based on their projects
             if interview.template_id:
                 from app.db.sql.models.interview_template import InterviewTemplate
-                from app.services.template_engine import template_engine, CodingProblemItem, ConversationalRoundItem
+                from app.services.template_engine import template_engine, CodingProblemItem
                 
                 template = await uow.session.get(InterviewTemplate, interview.template_id)
                 if template:
                     generated_items = await template_engine.generate_interview_questions(template, uow.session)
                     for item in generated_items:
+                        # Only process coding problems, skip conversational (they're generated live)
                         if isinstance(item, CodingProblemItem):
                             session_q = InterviewSessionQuestion(
                                 interview_session_id=new_session.id,
@@ -305,20 +308,8 @@ class InterviewSQLService:
                             )
                             uow.session.add(session_q)
                             order_idx += 1
-                        elif isinstance(item, ConversationalRoundItem):
-                            # ConversationalRoundItem doesn't have pre-generated questions,
-                            # they are generated live during the interview
-                            # But we still need to create a placeholder with custom_text to satisfy constraints
-                            session_q = InterviewSessionQuestion(
-                                interview_session_id=new_session.id,
-                                section_id=section_map["conversational"],
-                                question_type="conversational",
-                                conversation_round=item.conversation_round,
-                                custom_text=f"Conversational question round {item.conversation_round}",  # Set custom_text to satisfy constraint
-                                order=order_idx,
-                            )
-                            uow.session.add(session_q)
-                            order_idx += 1
+                        # Skip ConversationalRoundItem - these are generated live when section starts
+                        # No placeholder questions should be created
 
             await uow.flush()
 

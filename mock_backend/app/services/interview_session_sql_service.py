@@ -275,12 +275,18 @@ class InterviewSessionSQLService:
                         )
                         
                         if live_question and live_question.get("prompt"):
-                            # Create InterviewSessionQuestion
+                            question_prompt = live_question.get("prompt", "").strip()
+                            if not question_prompt:
+                                # If prompt is empty, generate a fallback
+                                question_prompt = "Tell me about your projects and experience."
+                                logger.warning(f"[start_section] Generated question had empty prompt, using fallback")
+                            
+                            # Create InterviewSessionQuestion with proper text
                             session_question = InterviewSessionQuestion(
                                 id=uuid.uuid4(),
                                 interview_session_id=session_obj.id,
                                 section_id=section_id,
-                                custom_text=live_question.get("prompt", ""),
+                                custom_text=question_prompt,  # Always set proper text, never placeholder
                                 order=round_num,
                                 question_type="conversational",
                                 conversation_round=round_num
@@ -290,15 +296,32 @@ class InterviewSessionSQLService:
                             # Add to previous questions for next generation
                             previous_questions.append({
                                 "question_id": str(session_question.id),
-                                "prompt": live_question.get("prompt", ""),
+                                "prompt": question_prompt,
                                 "question_type": "conversational"
                             })
                             asked_question_ids.append(str(session_question.id))
                             
-                            logger.info(f"[start_section] Generated project-based question {round_num}: {live_question.get('prompt', '')[:80]}...")
+                            logger.info(f"[start_section] Generated project-based question {round_num}: {question_prompt[:80]}...")
                         else:
-                            logger.warning(f"[start_section] Failed to generate question for round {round_num}")
-                            break
+                            logger.warning(f"[start_section] Failed to generate question for round {round_num}, creating fallback")
+                            # Create a fallback question with proper text instead of breaking
+                            fallback_question = InterviewSessionQuestion(
+                                id=uuid.uuid4(),
+                                interview_session_id=session_obj.id,
+                                section_id=section_id,
+                                custom_text="Tell me about your projects and experience.",
+                                order=round_num,
+                                question_type="conversational",
+                                conversation_round=round_num
+                            )
+                            uow.session.add(fallback_question)
+                            previous_questions.append({
+                                "question_id": str(fallback_question.id),
+                                "prompt": "Tell me about your projects and experience.",
+                                "question_type": "conversational"
+                            })
+                            asked_question_ids.append(str(fallback_question.id))
+                            logger.warning(f"[start_section] Created fallback question for round {round_num}")
             
             await uow.flush()
             
@@ -437,12 +460,18 @@ class InterviewSessionSQLService:
                             asked_question_ids=asked_question_ids
                         )
                         
+                        # Ensure prompt is not empty
+                        question_prompt = live_question.get("prompt", "").strip() if live_question else ""
+                        if not question_prompt:
+                            question_prompt = "Tell me about your projects and experience."
+                            logger.warning(f"[get_session_state] Generated question had empty prompt, using fallback")
+                        
                         # Create InterviewSessionQuestion for the live question
                         live_session_question = InterviewSessionQuestion(
                             id=uuid.uuid4(),
                             interview_session_id=session_obj.id,
                             section_id=session_obj.current_section_id,
-                            custom_text=live_question.get("prompt", ""),
+                            custom_text=question_prompt,  # Always set proper text, never placeholder
                             order=len(all_questions_list) + 1,
                             question_type="conversational",
                             conversation_round=existing_count + 1
@@ -451,7 +480,7 @@ class InterviewSessionSQLService:
                         await uow.flush()
                         
                         # Log the generated question for debugging
-                        logger.info(f"[get_session_state] Generated live conversational question: {live_question.get('prompt', '')[:100]}...")
+                        logger.info(f"[get_session_state] Generated live conversational question: {question_prompt[:100]}...")
                         
                         # Return the live question
                         return {
@@ -525,12 +554,18 @@ class InterviewSessionSQLService:
                         asked_question_ids=asked_question_ids
                     )
                     
+                    # Ensure prompt is not empty
+                    question_prompt = live_question.get("prompt", "").strip() if live_question else ""
+                    if not question_prompt:
+                        question_prompt = "Tell me about your projects and experience."
+                        logger.warning(f"[get_session_state] Generated question had empty prompt, using fallback")
+                    
                     # Create InterviewSessionQuestion for the live question
                     live_session_question = InterviewSessionQuestion(
                         id=uuid.uuid4(),
                         interview_session_id=session_obj.id,
                         section_id=session_obj.current_section_id,
-                        custom_text=live_question.get("prompt", ""),
+                        custom_text=question_prompt,  # Always set proper text, never placeholder
                         order=len(all_questions_list) + 1,
                         question_type="conversational"
                     )
