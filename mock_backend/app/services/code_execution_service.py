@@ -67,6 +67,7 @@ LANGUAGE_CONFIG: dict[str, dict] = {
 # ---------------------------------------------------------------------------
 _DOCKER_BASE_FLAGS = [
     "--rm",
+    "-i",
     "--network", "none",
     f"--memory={MEMORY_LIMIT}",
     "--cpus=1",

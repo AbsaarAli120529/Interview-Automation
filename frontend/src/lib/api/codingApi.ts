@@ -33,6 +33,8 @@ export interface CodeSubmitResponse {
     state?: string
 }
 
+const BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000"
+
 export async function runCode(payload: {
     problem_id: string
     session_question_id?: string
@@ -41,7 +43,7 @@ export async function runCode(payload: {
     interview_id?: string
     candidate_id?: string
 }): Promise<CodeRunResponse> {
-    const res = await fetch("/api/v1/candidate/coding/run", {
+    const res = await fetch(`${BASE_URL}/api/v1/candidate/coding/run`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload)
@@ -61,7 +63,7 @@ export async function submitCode(payload: {
     interview_id?: string
     candidate_id?: string
 }): Promise<CodeSubmitResponse> {
-    const res = await fetch("/api/v1/candidate/coding/submit", {
+    const res = await fetch(`${BASE_URL}/api/v1/candidate/coding/submit`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload)

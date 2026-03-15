@@ -279,16 +279,32 @@ async def submit_code(
 
     pid = _parse_uuid(request.problem_id, "problem_id")
 
+    session_uuid: Optional[uuid.UUID] = None
     interview_uuid: Optional[uuid.UUID] = None
     candidate_uuid: Optional[uuid.UUID] = None
     session_question_uuid: Optional[uuid.UUID] = None
 
     if request.interview_id:
-        interview_uuid = _parse_uuid(request.interview_id, "interview_id")
+        # Note: Frontend actually passes InterviewSession.id inside request.interview_id
+        session_uuid = _parse_uuid(request.interview_id, "interview_id")
     if request.candidate_id:
         candidate_uuid = _parse_uuid(request.candidate_id, "candidate_id")
     if request.session_question_id:
         session_question_uuid = _parse_uuid(request.session_question_id, "session_question_id")
+
+    # Resolve true IDs out of the session
+    if session_uuid:
+        from app.db.sql.models.interview_session import InterviewSession
+        from app.db.sql.models.interview import Interview
+
+        stmt = select(InterviewSession.interview_id, Interview.candidate_id).join(
+            Interview, Interview.id == InterviewSession.interview_id
+        ).where(InterviewSession.id == session_uuid)
+
+        row = await session.execute(stmt)
+        res = row.first()
+        if res:
+            interview_uuid, candidate_uuid = res
 
     # Verify problem exists
     prob_result = await session.execute(
@@ -365,14 +381,15 @@ async def submit_code(
     await session.commit()
     await session.refresh(submission)
 
+    submission_id_str = str(submission.id)
     session_state = "IN_PROGRESS"
 
-    if interview_uuid and session_question_uuid:
+    if session_uuid and session_question_uuid:
         from app.services.interview_session_sql_service import InterviewSessionSQLService
         try:
             res = await InterviewSessionSQLService.mark_coding_question_answered(
                 session=session,
-                session_id=interview_uuid,
+                session_id=session_uuid,
                 session_question_id=session_question_uuid,
                 passed_count=passed_count,
                 total_count=total_count,
@@ -384,7 +401,7 @@ async def submit_code(
 
     logger.info(
         "Code submission saved: id=%s problem=%s status=%s passed=%d/%d",
-        submission.id,
+        submission_id_str,
         pid,
         sub_status.value,
         passed_count,
@@ -392,7 +409,7 @@ async def submit_code(
     )
 
     return SubmitResponse(
-        submission_id=str(submission.id),
+        submission_id=submission_id_str,
         status=sub_status.value,
         passed=passed_count,
         total=total_count,

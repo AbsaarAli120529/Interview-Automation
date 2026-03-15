@@ -278,6 +278,12 @@ export default function InterviewShell() {
         }
     };
 
+    // ─── Coding questions get their own full-screen IDE layout ───
+    if (currentQuestion.type === "coding") {
+        return <CodingQuestion question={currentQuestion} interviewId={interviewId} />;
+    }
+
+    // ─── Non-coding questions: standard layout with sidebar ───
     return (
         <div className="flex h-screen bg-gray-100">
             {/* Left Sidebar - Video Feed */}
@@ -313,7 +319,7 @@ export default function InterviewShell() {
 
             {/* Main Content Area */}
             <div className="flex-1 flex flex-col overflow-hidden">
-                {/* Submit Section Button - Always visible at top */}
+                {/* Submit Section Button */}
                 <div className="bg-white border-b border-gray-200 px-6 py-3 flex justify-end">
                     <button
                         onClick={handleCompleteSection}
@@ -333,35 +339,29 @@ export default function InterviewShell() {
                             <Timer durationSec={currentQuestion.time_limit_sec} onExpire={handleSubmit} />
                         </div>
 
-                        {currentQuestion.type === "coding" ? (
-                            <CodingQuestion question={currentQuestion} interviewId={interviewId} />
-                        ) : (
-                            <>
-                                <QuestionPanel question={currentQuestion} />
+                        <QuestionPanel question={currentQuestion} />
 
-                                <AnswerPanel
-                                    mode={currentQuestion.answer_mode}
-                                    value={answerPayload}
-                                    onChange={setAnswerPayload}
-                                    questionId={currentQuestion.question_id}
-                                    onVoiceStart={async () => {
-                                        // Voice verification will be handled by the AnswerPanel's audio stream
-                                    }}
-                                />
+                        <AnswerPanel
+                            mode={currentQuestion.answer_mode}
+                            value={answerPayload}
+                            onChange={setAnswerPayload}
+                            questionId={currentQuestion.question_id}
+                            onVoiceStart={async () => {
+                                // Voice verification will be handled by the AnswerPanel's audio stream
+                            }}
+                        />
 
-                                <button
-                                    onClick={handleSubmit}
-                                    disabled={
-                                        isSubmitting ||
-                                        !answerPayload ||
-                                        !answerPayload.trim()
-                                    }
-                                    className="mt-4 px-6 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed self-end transition-colors"
-                                >
-                                    {isSubmitting ? "Submitting..." : "Submit Answer"}
-                                </button>
-                            </>
-                        )}
+                        <button
+                            onClick={handleSubmit}
+                            disabled={
+                                isSubmitting ||
+                                !answerPayload ||
+                                !answerPayload.trim()
+                            }
+                            className="mt-4 px-6 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed self-end transition-colors"
+                        >
+                            {isSubmitting ? "Submitting..." : "Submit Answer"}
+                        </button>
                     </div>
                 </div>
             </div>
