@@ -11,6 +11,7 @@ interface ConnectParams {
 class AnswerWebSocket {
     private _ws: WebSocket | null = null;
     private questionId: string | null = null;
+    private _audioChunkCount: number = 0;
     
     get ws(): WebSocket | null {
         return this._ws;
@@ -24,6 +25,7 @@ class AnswerWebSocket {
         }
 
         this.questionId = questionId;
+        this._audioChunkCount = 0;
 
         const baseUrl = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000";
         const wsUrl = baseUrl
@@ -85,7 +87,6 @@ class AnswerWebSocket {
             try {
                 this._ws.send(data);
                 // Log every 10th chunk to avoid spam
-                if (!this._audioChunkCount) this._audioChunkCount = 0;
                 this._audioChunkCount++;
                 if (this._audioChunkCount % 10 === 0) {
                     console.log(`[AnswerWebSocket] Sent ${this._audioChunkCount} audio chunks`);
