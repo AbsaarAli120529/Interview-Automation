@@ -150,7 +150,7 @@ class InterviewSessionSQLService:
             from app.db.sql.models.interview_session_question import InterviewSessionQuestion
             from app.db.sql.models.interview_response import InterviewResponse
             
-            session_obj, _ = await InterviewSessionSQLService._get_session_and_interview(
+            session_obj, interview = await InterviewSessionSQLService._get_session_and_interview(
                 uow, session_id, candidate_id
             )
             
@@ -179,13 +179,26 @@ class InterviewSessionSQLService:
                     resp_res = await session.execute(resp_stmt)
                     completed_q = resp_res.scalar() or 0
                 
+                total_q = len(q_ids)
+                if s.section_type == "conversational":
+                    from app.db.sql.models.interview_template import InterviewTemplate
+                    template = None
+                    if interview.template_id:
+                        template = await uow.session.get(InterviewTemplate, interview.template_id)
+                    max_conv = 10
+                    if template and template.conversational_config:
+                        conv_config = template.conversational_config
+                        if isinstance(conv_config, dict):
+                            max_conv = conv_config.get("rounds", 10)
+                    total_q = max_conv
+
                 res.append({
                     "id": str(s.id),
                     "section_type": s.section_type,
                     "order_index": s.order_index,
                     "duration_minutes": s.duration_minutes,
                     "status": s.status,
-                    "total_questions": len(q_ids),
+                    "total_questions": total_q,
                     "completed_questions": completed_q,
                     "started_at": s.started_at.isoformat() if s.started_at else None,
                     "completed_at": s.completed_at.isoformat() if s.completed_at else None,
@@ -450,7 +463,7 @@ class InterviewSessionSQLService:
                                 InterviewSessionQuestion.question_type == "conversational"
                             )
                             conv_count_result = await uow.session.execute(conv_count_stmt)
-                            conv_question_number = (conv_count_result.scalar() or 0) + 1
+                            conv_question_number = conv_count_result.scalar() or 1
                             
                             return {
                                 "type": "conversational",
@@ -565,24 +578,24 @@ class InterviewSessionSQLService:
                     # Store necessary data briefly
                     current_section_id = session_obj.current_section_id
                     
-                # --- Step 2: Call LLM OUTSIDE DB transaction ---
-                from app.services.question_generator_service import question_generator_service
-                async with LLM_SEMAPHORE:
-                    live_question = await question_generator_service.generate_live_conversational_question(
-                        resume_data=resume_data or {},
-                        jd_data=jd_data or {},
-                        previous_questions=previous_questions,
-                        previous_answers=previous_answers,
-                        asked_question_ids=asked_question_ids
-                    )
-                
-                # --- Step 3: Re-open session for write ---
-                async with UnitOfWork(session) as uow:
-                    # Update the question with the generated text
-                    q.custom_text = live_question.get("prompt", "Tell me about your projects.")
-                    question_text = q.custom_text
-                    await uow.flush()
-                    logger.debug(f"[get_session_state] Generated and updated question text: {question_text[:80]}...")
+                    # --- Step 2: Call LLM OUTSIDE DB transaction ---
+                    from app.services.question_generator_service import question_generator_service
+                    async with LLM_SEMAPHORE:
+                        live_question = await question_generator_service.generate_live_conversational_question(
+                            resume_data=resume_data or {},
+                            jd_data=jd_data or {},
+                            previous_questions=previous_questions,
+                            previous_answers=previous_answers,
+                            asked_question_ids=asked_question_ids
+                        )
+                    
+                    # --- Step 3: Re-open session for write ---
+                    async with UnitOfWork(session) as uow:
+                        # Update the question with the generated text
+                        q.custom_text = live_question.get("prompt", "Tell me about your projects.")
+                        question_text = q.custom_text
+                        await uow.flush()
+                        logger.debug(f"[get_session_state] Generated and updated question text: {question_text[:80]}...")
                 
                 # Ensure question_text is not empty
                 if not question_text or question_text.strip() == "":
@@ -590,6 +603,17 @@ class InterviewSessionSQLService:
                     logger.warning(f"[get_session_state] Using fallback question text for question {q.id}")
                 
                 logger.debug(f"[get_session_state] Returning conversational question: '{question_text[:100]}...'")
+                
+                from app.db.sql.models.interview_template import InterviewTemplate
+                template = None
+                if interview.template_id:
+                    template = await uow.session.get(InterviewTemplate, interview.template_id)
+                num_conversational_questions = 10
+                if template and template.conversational_config:
+                    conv_config = template.conversational_config
+                    if isinstance(conv_config, dict):
+                        num_conversational_questions = conv_config.get("rounds", 10)
+
                 return {
                     "type": "conversational",
                     "conversation_round": q.conversation_round or 1,
@@ -599,7 +623,7 @@ class InterviewSessionSQLService:
                     "question_text": question_text,
                     "question_id": str(q.id),
                     "question_number": answered_count_in_section + 1,
-                    "total_questions": len(questions),
+                    "total_questions": num_conversational_questions,
                 }
 
             # ── TECHNICAL branch ──────────────────────────────────────────────
