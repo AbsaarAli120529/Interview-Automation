@@ -8,7 +8,7 @@ import os
 import logging
 from typing import Dict, Any, List, Optional
 from pathlib import Path
-from openai import AzureOpenAI
+from openai import AzureOpenAI, AsyncAzureOpenAI
 from app.core.config import settings
 
 # Try to load .env file if python-dotenv is available
@@ -37,6 +37,7 @@ class AzureOpenAIService:
     
     def __init__(self):
         self.client = None
+        self.async_client = None
         self._initialize_client()
     
     def _initialize_client(self):
@@ -72,6 +73,11 @@ class AzureOpenAIService:
             azure_endpoint = azure_endpoint.rstrip('/')
             
             self.client = AzureOpenAI(
+                azure_endpoint=azure_endpoint,
+                api_key=api_key,
+                api_version=api_version
+            )
+            self.async_client = AsyncAzureOpenAI(
                 azure_endpoint=azure_endpoint,
                 api_key=api_key,
                 api_version=api_version

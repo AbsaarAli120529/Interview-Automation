@@ -49,6 +49,16 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Suppress verbose Socket.IO / Engine.IO logs
+engineio_logger = logging.getLogger("engineio")
+socketio_logger = logging.getLogger("socketio")
+
+engineio_logger.setLevel(logging.WARNING)
+socketio_logger.setLevel(logging.WARNING)
+
+engineio_logger.propagate = False
+socketio_logger.propagate = False
+
 @asynccontextmanager  
 async def lifespan(app: FastAPI):
     # ── Step 1: Verify database connectivity ──────────────────────────────────
@@ -65,8 +75,8 @@ app = FastAPI(title="AI Interview Automation Mock Backend", lifespan=lifespan)
 sio = socketio.AsyncServer(
     async_mode='asgi',
     cors_allowed_origins=os.getenv("ALLOWED_ORIGINS", "http://localhost:3002").split(","),
-    logger=True,
-    engineio_logger=True,
+    logger=False,
+    engineio_logger=False,
     ping_timeout=60,
     ping_interval=25
 )

@@ -11,6 +11,7 @@ import logging
 from typing import Dict, Any, Optional
 import pypdf
 import io
+import asyncio
 from app.services.azure_openai_service import azure_openai_service
 
 logger = logging.getLogger(__name__)
@@ -96,7 +97,7 @@ class ResumeJDParser:
             }
     
     @staticmethod
-    def parse_job_description(jd_text: str) -> Dict[str, Any]:
+    async def parse_job_description(jd_text: str) -> Dict[str, Any]:
         """
         Parse a job description text using Azure OpenAI LLM.
         
@@ -114,8 +115,8 @@ class ResumeJDParser:
             - job_title: Job title
             - location: Job location
         """
-        if not azure_openai_service.client:
-            logger.warning("Azure OpenAI not configured, using fallback parsing")
+        if not azure_openai_service.async_client:
+            logger.warning("Azure OpenAI async client not configured, using fallback parsing")
             return ResumeJDParser._fallback_parse_jd(jd_text)
         
         try:
@@ -150,18 +151,26 @@ IMPORTANT: In "required_skills" and "technologies" arrays, include:
 
 Return ONLY the JSON object, no additional text or markdown."""
 
-            response = azure_openai_service.client.chat.completions.create(
-                model="gpt-4o",
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt}
-                ],
-                temperature=0.1,
-                max_tokens=2000,
-                response_format={"type": "json_object"}
-            )
+            from fastapi.concurrency import run_in_threadpool
             
-            parsed_json = json.loads(response.choices[0].message.content)
+            start_time = asyncio.get_event_loop().time()
+            response = await asyncio.wait_for(
+                azure_openai_service.async_client.chat.completions.create(
+                    model="gpt-4o",
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt}
+                    ],
+                    temperature=0.1,
+                    max_tokens=2000,
+                    response_format={"type": "json_object"}
+                ),
+                timeout=60
+            )
+            duration = asyncio.get_event_loop().time() - start_time
+            logger.info(f"✅ JD parsed by LLM in {duration:.2f}s")
+            
+            parsed_json = await run_in_threadpool(json.loads, response.choices[0].message.content)
             parsed_json['text'] = jd_text  # Keep original text
             logger.info("Successfully parsed JD with LLM")
             return parsed_json

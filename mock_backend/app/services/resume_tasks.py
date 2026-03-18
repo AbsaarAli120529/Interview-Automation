@@ -58,21 +58,21 @@ async def parse_candidate_resume(candidate_id: uuid.UUID, password: str = None):
                     except Exception as e:
                         logger.error(f"Error extracting text from PDF for candidate {candidate_id}: {e}")
 
-                # 3. Structured Resume Parsing (Offload LLM block to thread)
+                # 3. Structured Resume Parsing
                 resume_json = None
                 if profile.resume_text:
                     try:
-                        resume_json = await anyio.to_thread.run_sync(parse_resume_with_llm, profile.resume_text)
+                        resume_json = await parse_resume_with_llm(profile.resume_text)
                         if resume_json:
                             resume_json['text'] = profile.resume_text
                     except Exception as e:
                         logger.error(f"Error parsing structured resume for candidate {candidate_id}: {e}", exc_info=True)
                 
-                # 4. Structured JD Parsing (Offload LLM block to thread)
+                # 4. Structured JD Parsing
                 jd_json = None
                 if profile.job_description:
                     try:
-                        jd_json = await anyio.to_thread.run_sync(resume_jd_parser.parse_job_description, profile.job_description)
+                        jd_json = await resume_jd_parser.parse_job_description(profile.job_description)
                     except Exception as e:
                         logger.error(f"Error parsing job description for candidate {candidate_id}: {e}")
                 

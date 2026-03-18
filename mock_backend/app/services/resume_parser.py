@@ -8,6 +8,7 @@ import json
 import logging
 from pathlib import Path
 from typing import Optional, Tuple, Dict, Any
+import asyncio
 from app.services.azure_openai_service import azure_openai_service
 
 logger = logging.getLogger(__name__)
@@ -32,15 +33,15 @@ def extract_text_from_pdf(content: bytes) -> str:
         return ""
 
 
-def parse_resume_with_llm(resume_text: str) -> Dict[str, Any]:
+async def parse_resume_with_llm(resume_text: str) -> Dict[str, Any]:
     """
     Parse resume text using Azure OpenAI LLM to extract structured information.
     
     Returns:
         Dictionary with keys: skills, years_of_experience, education, projects, etc.
     """
-    if not azure_openai_service.client:
-        logger.warning("Azure OpenAI not configured, using fallback parsing")
+    if not azure_openai_service.async_client:
+        logger.warning("Azure OpenAI async client not configured, using fallback parsing")
         return _fallback_parse_resume(resume_text)
     
     try:
@@ -95,18 +96,26 @@ IMPORTANT: In the "skills" array, include:
 
 Return ONLY the JSON object, no additional text or markdown."""
 
-        response = azure_openai_service.client.chat.completions.create(
-            model="gpt-4o",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ],
-            temperature=0.1,
-            max_tokens=2000,
-            response_format={"type": "json_object"}
-        )
+        from fastapi.concurrency import run_in_threadpool
         
-        parsed_json = json.loads(response.choices[0].message.content)
+        start_time = asyncio.get_event_loop().time()
+        response = await asyncio.wait_for(
+            azure_openai_service.async_client.chat.completions.create(
+                model="gpt-4o",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ],
+                temperature=0.1,
+                max_tokens=2000,
+                response_format={"type": "json_object"}
+            ),
+            timeout=60
+        )
+        duration = asyncio.get_event_loop().time() - start_time
+        logger.info(f"✅ Resume parsed by LLM in {duration:.2f}s")
+        
+        parsed_json = await run_in_threadpool(json.loads, response.choices[0].message.content)
         
         # Extract additional skills from projects and experience
         all_skills = set(parsed_json.get('skills', []))
@@ -162,7 +171,7 @@ def _fallback_parse_resume(resume_text: str) -> Dict[str, Any]:
     }
 
 
-def save_resume_and_extract_text(
+async def save_resume_and_extract_text(
     candidate_id: str,
     resume_id: str,
     content: bytes,
@@ -193,6 +202,6 @@ def save_resume_and_extract_text(
         text = extract_text_from_pdf(content)
         if text:
             # Parse with LLM
-            parsed_data = parse_resume_with_llm(text)
+            parsed_data = await parse_resume_with_llm(text)
     
     return text, path, parsed_data

@@ -596,12 +596,15 @@ class QuestionGeneratorService:
         try:
             import random
             import uuid
+            import asyncio
+            from fastapi.concurrency import run_in_threadpool
             
-            logger.debug(f"[QuestionGenerator] Generating {num_questions} questions with LLM for skills: {skills}")
-            logger.debug(f"LLM Question Generation - Skills: {skills}, Role: {role_name}, Questions: {num_questions}")
+            # Contextual logging
+            # (Note: session_id is not passed here, but we can log important context)
+            logger.info(f"🤖 [QuestionGenerator] Generating {num_questions} questions with LLM for skills: {skills}")
             
-            if not azure_openai_service.client:
-                logger.warning("Azure OpenAI not configured, using mock questions")
+            if not azure_openai_service.async_client:
+                logger.warning("Azure OpenAI async client not configured, using mock questions")
                 return QuestionGeneratorService._generate_mock_skill_based_questions(num_questions, skills, role_name)
             
             # Build prompt for LLM question generation
@@ -649,30 +652,40 @@ INSTRUCTIONS:
 
 Return ONLY the JSON array, no additional text or markdown."""
 
-            logger.debug(f"Sending request to Azure OpenAI (Prompt length: {len(user_prompt)} characters)")
+            logger.debug(f"Sending async request to Azure OpenAI (Prompt length: {len(user_prompt)} characters)")
             
-            response = azure_openai_service.client.chat.completions.create(
-                model="gpt-4o",
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt}
-                ],
-                temperature=0.7,
-                max_tokens=2000
-                # Note: Not using response_format={"type": "json_object"} because we need an array, not an object
+            start_time = datetime.now()
+            response = await asyncio.wait_for(
+                azure_openai_service.async_client.chat.completions.create(
+                    model="gpt-4o",
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt}
+                    ],
+                    temperature=0.7,
+                    max_tokens=2000
+                ),
+                timeout=60
             )
+            duration = (datetime.now() - start_time).total_seconds()
+            logger.info(f"✅ LLM generation completed in {duration:.2f}s")
             
-            # Parse response
+            # Parse response - use threadpool for heavy JSON parsing
             import json
             import re
             response_text = response.choices[0].message.content
             logger.debug(f"Received response from Azure OpenAI (Length: {len(response_text)} characters)")
             
-            # Try to extract JSON array
-            json_match = re.search(r'\[.*\]', response_text, re.DOTALL)
-            if json_match:
-                llm_questions = json.loads(json_match.group())
-            else:
+            # Use threadpool for parsing if needed
+            def parse_json_safely(text):
+                # Try to extract JSON array
+                json_match = re.search(r'\[.*\]', text, re.DOTALL)
+                if json_match:
+                    return json.loads(json_match.group())
+                return None
+
+            llm_questions = await run_in_threadpool(parse_json_safely, response_text)
+            if llm_questions is None:
                 # Try parsing as JSON object with questions key
                 try:
                     parsed = json.loads(response_text)
@@ -795,6 +808,8 @@ Return ONLY the JSON array, no additional text or markdown."""
         """
         import random
         import uuid
+        import asyncio
+        from fastapi.concurrency import run_in_threadpool
         
         logger.debug(f"💬 Generating LIVE conversational question...")
         logger.debug(f"   Previous questions: {len(previous_questions)}")
@@ -886,19 +901,25 @@ INSTRUCTIONS:
 
 Return ONLY the JSON object."""
 
-                response = azure_openai_service.client.chat.completions.create(
-                    model="gpt-4o",
-                    messages=[
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_prompt}
-                    ],
-                    temperature=0.8,
-                    max_tokens=500,
-                    response_format={"type": "json_object"}
+                start_time = datetime.now()
+                response = await asyncio.wait_for(
+                    azure_openai_service.async_client.chat.completions.create(
+                        model="gpt-4o",
+                        messages=[
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": user_prompt}
+                        ],
+                        temperature=0.8,
+                        max_tokens=500,
+                        response_format={"type": "json_object"}
+                    ),
+                    timeout=60
                 )
+                duration = (datetime.now() - start_time).total_seconds()
+                logger.info(f"✅ Live conversational question generated in {duration:.2f}s")
                 
                 import json
-                llm_response = json.loads(response.choices[0].message.content)
+                llm_response = await run_in_threadpool(json.loads, response.choices[0].message.content)
                 
                 # Format the question
                 question_text = llm_response.get('question', 'Tell me more about your experience.')
@@ -1115,19 +1136,25 @@ ROLE: {role_name or 'Technical Candidate'}
 
 Return ONLY the JSON object."""
 
-            response = azure_openai_service.client.chat.completions.create(
-                model="gpt-4o",
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt}
-                ],
-                temperature=0.7,
-                max_tokens=800,
-                response_format={"type": "json_object"}
+            start_time = datetime.now()
+            response = await asyncio.wait_for(
+                azure_openai_service.async_client.chat.completions.create(
+                    model="gpt-4o",
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt}
+                    ],
+                    temperature=0.7,
+                    max_tokens=2000,
+                    response_format={"type": "json_object"}
+                ),
+                timeout=60
             )
+            duration = (datetime.now() - start_time).total_seconds()
+            logger.info(f"✅ Question regenerated in {duration:.2f}s")
             
             content = response.choices[0].message.content
-            llm_q = json.loads(content)
+            llm_q = await run_in_threadpool(json.loads, content)
             
             # Map values back to our schema
             difficulty = llm_q.get('difficulty', existing_question.get('difficulty', 'medium')).lower()

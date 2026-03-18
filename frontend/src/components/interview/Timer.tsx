@@ -33,7 +33,9 @@ export default function Timer({ durationSec, onExpire }: TimerProps) {
                     }
                     if (!hasExpiredRef.current) {
                         hasExpiredRef.current = true;
-                        onExpireRef.current();
+                        setTimeout(() => {
+                            onExpireRef.current();
+                        }, 0);
                     }
                     return 0;
                 }
