@@ -1,4 +1,5 @@
 import { getWSBaseURL } from "./apiClient";
+import { io, Socket } from "socket.io-client";
 
 interface ConnectParams {
     questionId: string;
@@ -11,18 +12,18 @@ interface ConnectParams {
 }
 
 class AnswerWebSocket {
-    private _ws: WebSocket | null = null;
+    private socket: Socket | null = null;
     private questionId: string | null = null;
     private _audioChunkCount: number = 0;
     
-    get ws(): WebSocket | null {
-        return this._ws;
+    get ws(): Socket | null {
+        return this.socket;
     }
 
     connect(params: ConnectParams): void {
         const { questionId, onOpen, onPartialTranscript, onFinalTranscript, onAnswerReady, onError, onClose } = params;
 
-        if (this._ws) {
+        if (this.socket) {
             this.disconnect();
         }
 
@@ -30,61 +31,70 @@ class AnswerWebSocket {
         this._audioChunkCount = 0;
 
         const wsBase = getWSBaseURL();
-        const fullUrl = `${wsBase}/api/v1/answer/ws`;
-        console.log(`[AnswerWebSocket] Connecting to: ${fullUrl}`);
-        this._ws = new WebSocket(fullUrl);
+        // Convert ws:// to http:// and wss:// to https:// for SocketIO
+        const httpBase = wsBase.replace(/^ws/, 'http').replace(/^wss/, 'https');
+        const socketUrl = `${httpBase}/answer/ws`;
+        
+        console.log(`[AnswerWebSocket] Connecting to: ${socketUrl}`);
+        
+        this.socket = io(socketUrl, {
+            transports: ['websocket', 'polling'], // Enable polling fallback
+            reconnection: false, // Don't auto-reconnect for answer sessions
+        });
 
-        this._ws.onopen = () => {
-            if (this._ws && this._ws.readyState === WebSocket.OPEN && this.questionId) {
-                this._ws.send(JSON.stringify({
+        this.socket.on('connect', () => {
+            if (this.socket && this.socket.connected && this.questionId) {
+                this.socket.emit('START_ANSWER', {
                     type: "START_ANSWER",
                     question_id: this.questionId,
-                }));
+                });
                 onOpen();
             }
-        };
+        });
 
-        this._ws.onmessage = (event) => {
-            if (!this.questionId) return;
+        this.socket.on('STARTED', () => {
+            console.log("[AnswerWebSocket] Transcription started");
+        });
 
-            try {
-                const message = JSON.parse(event.data);
-                console.log("[AnswerWebSocket] Received message:", message.type);
+        this.socket.on('TRANSCRIPT_PARTIAL', (data: any) => {
+            console.log("[AnswerWebSocket] PARTIAL TRANSCRIPT:", data.text);
+            onPartialTranscript(data.text || "");
+        });
 
-                if (message.type === "STARTED") {
-                    console.log("[AnswerWebSocket] Transcription started");
-                } else if (message.type === "TRANSCRIPT_PARTIAL") {
-                    console.log("[AnswerWebSocket] PARTIAL TRANSCRIPT:", message.text);
-                    onPartialTranscript(message.text);
-                } else if (message.type === "TRANSCRIPT_FINAL") {
-                    console.log("[AnswerWebSocket] FINAL TRANSCRIPT:", message.text);
-                    onFinalTranscript(message.text);
-                } else if (message.type === "ANSWER_READY") {
-                    console.log("[AnswerWebSocket] ANSWER READY:", message.transcript_id);
-                    onAnswerReady(message.transcript_id);
-                    this.disconnect();
-                }
-            } catch (error) {
-                console.error("[AnswerWebSocket] Failed to parse message:", error);
-            }
-        };
+        this.socket.on('TRANSCRIPT_FINAL', (data: any) => {
+            console.log("[AnswerWebSocket] FINAL TRANSCRIPT:", data.text);
+            onFinalTranscript(data.text || "");
+        });
 
-        this._ws.onerror = (error) => {
-            console.error("[AnswerWebSocket] WebSocket error:", error);
-            onError(error);
-        };
+        this.socket.on('ANSWER_READY', (data: any) => {
+            console.log("[AnswerWebSocket] ANSWER READY:", data.transcript_id);
+            onAnswerReady(data.transcript_id || "");
+            this.disconnect();
+        });
 
-        this._ws.onclose = (event) => {
-            console.log(`[AnswerWebSocket] WebSocket closed: code=${event.code}, reason=${event.reason || 'none'}`);
+        this.socket.on('ERROR', (data: any) => {
+            console.error("[AnswerWebSocket] Error from server:", data.detail);
+            onError(new Error(data.detail || "WebSocket error") as any);
+        });
+
+        this.socket.on('connect_error', (error: Error) => {
+            console.error("[AnswerWebSocket] SocketIO connection error:", error);
+            onError(error as any);
+        });
+
+        this.socket.on('disconnect', (reason: string) => {
+            console.log(`[AnswerWebSocket] SocketIO disconnected: ${reason}`);
             onClose();
-        };
+        });
     }
 
     sendAudio(data: ArrayBuffer): void {
-        if (this._ws && this._ws.readyState === WebSocket.OPEN) {
+        if (this.socket && this.socket.connected) {
             try {
-                this._ws.send(data);
-                // Log every 10th chunk to avoid spam
+                // Convert ArrayBuffer to base64 for SocketIO
+                const base64 = this.arrayBufferToBase64(data);
+                this.socket.emit('audio_data', { data: base64 });
+                
                 this._audioChunkCount++;
                 if (this._audioChunkCount % 10 === 0) {
                     console.log(`[AnswerWebSocket] Sent ${this._audioChunkCount} audio chunks`);
@@ -95,12 +105,21 @@ class AnswerWebSocket {
         }
     }
 
+    private arrayBufferToBase64(buffer: ArrayBuffer): string {
+        const bytes = new Uint8Array(buffer);
+        let binary = '';
+        for (let i = 0; i < bytes.byteLength; i++) {
+            binary += String.fromCharCode(bytes[i]);
+        }
+        return btoa(binary);
+    }
+
     endAnswer(): void {
-        if (this._ws && this._ws.readyState === WebSocket.OPEN) {
+        if (this.socket && this.socket.connected) {
             try {
-                this._ws.send(JSON.stringify({
+                this.socket.emit('END_ANSWER', {
                     type: "END_ANSWER",
-                }));
+                });
             } catch (error) {
                 console.error("[AnswerWebSocket] Error ending answer:", error);
             }
@@ -108,15 +127,15 @@ class AnswerWebSocket {
     }
 
     disconnect(): void {
-        if (this._ws) {
+        if (this.socket) {
             try {
-                if (this._ws.readyState === WebSocket.OPEN || this._ws.readyState === WebSocket.CONNECTING) {
-                    this._ws.close();
+                if (this.socket.connected) {
+                    this.socket.disconnect();
                 }
             } catch (error) {
                 // Ignore errors during disconnect
             }
-            this._ws = null;
+            this.socket = null;
         }
         this.questionId = null;
     }

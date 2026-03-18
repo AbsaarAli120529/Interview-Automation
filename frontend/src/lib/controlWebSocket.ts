@@ -1,4 +1,5 @@
 import { getWSBaseURL } from "./apiClient";
+import { io, Socket } from "socket.io-client";
 
 interface ConnectParams {
     interviewId: string;
@@ -10,111 +11,109 @@ interface ConnectParams {
 }
 
 class ControlWebSocket {
-    private ws: WebSocket | null = null;
+    private socket: Socket | null = null;
     private heartbeatIntervalId: ReturnType<typeof setInterval> | null = null;
     private heartbeatIntervalSec: number = 10;
 
     connect(params: ConnectParams): void {
-        if (this.ws) {
-            if (
-                this.ws.readyState === WebSocket.OPEN ||
-                this.ws.readyState === WebSocket.CONNECTING
-            ) {
-                console.warn('[controlWebSocket] Already open or connecting. Skipping duplicate connect.');
-                return;
-            }
-            this.ws.close();
-            this.ws = null;
+        if (this.socket && this.socket.connected) {
+            console.warn('[controlWebSocket] Already connected. Skipping duplicate connect.');
+            return;
+        }
+
+        if (this.socket) {
+            this.disconnect();
         }
 
         const { interviewId, candidateToken, onOpen, onTerminate, onError, onClose } = params;
 
-
         const wsBase = getWSBaseURL();
-        const fullUrl = `${wsBase}/api/v1/proctoring/ws`;
-        console.log(`[ControlWebSocket] Connecting to: ${fullUrl}`);
+        // Convert ws:// to http:// and wss:// to https:// for SocketIO
+        const httpBase = wsBase.replace(/^ws/, 'http').replace(/^wss/, 'https');
+        const socketUrl = `${httpBase}/proctoring/ws`;
+        
+        console.log(`[ControlWebSocket] Connecting to: ${socketUrl}`);
         
         try {
-            this.ws = new WebSocket(fullUrl);
-        } catch (error) {
-            console.error("[ControlWebSocket] Failed to create WebSocket:", error);
-            onError(error as Event);
-            return;
-        }
+            this.socket = io(socketUrl, {
+                transports: ['websocket', 'polling'], // Enable polling fallback
+                reconnection: true,
+                reconnectionAttempts: 5,
+                reconnectionDelay: 1000,
+            });
 
-        this.ws.onopen = () => {
-            console.log("[ControlWebSocket] WebSocket opened, sending HANDSHAKE");
-            if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-                try {
-                    this.ws.send(JSON.stringify({
+            this.socket.on('connect', () => {
+                console.log("[ControlWebSocket] SocketIO connected, sending HANDSHAKE");
+                if (this.socket && this.socket.connected) {
+                    this.socket.emit('HANDSHAKE', {
                         type: "HANDSHAKE",
                         interview_id: interviewId,
                         candidate_token: candidateToken,
-                    }));
-                } catch (error) {
-                    console.error("[ControlWebSocket] Failed to send HANDSHAKE:", error);
-                    onError(error as Event);
+                    });
                 }
-            }
-        };
+            });
 
-        this.ws.onmessage = (event) => {
-            try {
-                const message = JSON.parse(event.data);
-                console.log("[ControlWebSocket] Received message:", message.type);
+            this.socket.on('HANDSHAKE_ACK', (data: any) => {
+                this.heartbeatIntervalSec = data.heartbeat_interval_sec || 10;
+                this.startHeartbeat();
+                console.log("[ControlWebSocket] HANDSHAKE_ACK received, connection established");
+                onOpen();
+            });
 
-                if (message.type === "HANDSHAKE_ACK") {
-                    this.heartbeatIntervalSec = message.heartbeat_interval_sec || 10;
-                    this.startHeartbeat();
-                    console.log("[ControlWebSocket] HANDSHAKE_ACK received, connection established");
-                    onOpen();
-                } else if (message.type === "HEARTBEAT_ACK") {
-                    // Do nothing, heartbeat acknowledged
-                } else if (message.type === "TERMINATE") {
-                    this.stopHeartbeat();
-                    const reason = message.payload?.reason || message.detail || "Unknown reason";
-                    console.log("[ControlWebSocket] TERMINATE received:", reason);
-                    onTerminate(reason);
-                    this.ws?.close();
-                } else if (message.type === "ERROR") {
-                    console.error("[ControlWebSocket] Error from server:", message.detail);
-                    const error = new Error(message.detail || "WebSocket error");
-                    onError(error as any);
-                }
-            } catch (error) {
-                console.error("[ControlWebSocket] Failed to parse message:", error);
-                // Invalid JSON, ignore but log
-            }
-        };
+            this.socket.on('HEARTBEAT_ACK', () => {
+                // Heartbeat acknowledged, do nothing
+            });
 
-        this.ws.onerror = (error) => {
-            console.error("[ControlWebSocket] WebSocket error:", error);
-            onError(error);
-        };
+            this.socket.on('TERMINATE', (data: any) => {
+                this.stopHeartbeat();
+                const reason = data?.payload?.reason || data?.reason || "Unknown reason";
+                console.log("[ControlWebSocket] TERMINATE received:", reason);
+                onTerminate(reason);
+                this.disconnect();
+            });
 
-        this.ws.onclose = (event) => {
-            console.log(`[ControlWebSocket] WebSocket closed: code=${event.code}, reason=${event.reason || 'none'}`);
-            this.stopHeartbeat();
-            onClose(event);
-        };
+            this.socket.on('ERROR', (data: any) => {
+                console.error("[ControlWebSocket] Error from server:", data.detail);
+                const error = new Error(data.detail || "WebSocket error");
+                onError(error as any);
+            });
+
+            this.socket.on('connect_error', (error: Error) => {
+                console.error("[ControlWebSocket] SocketIO connection error:", error);
+                onError(error as any);
+            });
+
+            this.socket.on('disconnect', (reason: string) => {
+                console.log(`[ControlWebSocket] SocketIO disconnected: ${reason}`);
+                this.stopHeartbeat();
+                // Create a CloseEvent-like object for compatibility
+                const closeEvent = {
+                    code: 1000,
+                    reason: reason || 'none',
+                    wasClean: reason === 'io client disconnect'
+                } as CloseEvent;
+                onClose(closeEvent);
+            });
+
+        } catch (error) {
+            console.error("[ControlWebSocket] Failed to create SocketIO connection:", error);
+            onError(error as Event);
+        }
     }
 
     disconnect(): void {
-        if (!this.ws || this.ws.readyState === WebSocket.CLOSED) return;
-        this.stopHeartbeat();
-        if (this.ws) {
-            this.ws.onclose = null; // Prevent triggering onClose during manual disconnect
-            this.ws.onerror = null;
-            this.ws.close();
-            this.ws = null;
+        if (this.socket) {
+            this.stopHeartbeat();
+            this.socket.disconnect();
+            this.socket = null;
         }
     }
 
     private startHeartbeat(): void {
         this.stopHeartbeat();
         this.heartbeatIntervalId = setInterval(() => {
-            if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-                this.ws.send(JSON.stringify({ type: "HEARTBEAT" }));
+            if (this.socket && this.socket.connected) {
+                this.socket.emit('HEARTBEAT', { type: "HEARTBEAT" });
             }
         }, this.heartbeatIntervalSec * 1000);
     }
@@ -127,7 +126,10 @@ class ControlWebSocket {
     }
 
     getReadyState(): number {
-        return this.ws?.readyState ?? WebSocket.CLOSED;
+        if (!this.socket) return 3; // CLOSED
+        if (this.socket.connected) return 1; // OPEN
+        if (this.socket.disconnected) return 3; // CLOSED
+        return 0; // CONNECTING
     }
 }
 

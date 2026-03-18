@@ -1,3 +1,5 @@
+import { io, Socket } from "socket.io-client";
+
 interface ConnectParams {
     onOpen: () => void;
     onError: (error: Event) => void;
@@ -5,14 +7,14 @@ interface ConnectParams {
 }
 
 class MediaWebSocket {
-    private ws: WebSocket | null = null;
+    private socket: Socket | null = null;
     private reconnectAttempts: number = 0;
     private maxReconnectAttempts: number = 3;
     private manualClose: boolean = false;
     private connectParams: ConnectParams | null = null;
 
     connect(params: ConnectParams): void {
-        if (this.ws) {
+        if (this.socket) {
             this.disconnect();
         }
 
@@ -29,21 +31,30 @@ class MediaWebSocket {
         }
 
         const baseUrl = process.env.NEXT_PUBLIC_API_BASE_URL || "";
-        const wsUrl = baseUrl
-            .replace(/^https:/, "wss:")
-            .replace(/^http:/, "ws:");
+        // Convert http:// to ws:// and https:// to wss://, then back to http/https for SocketIO
+        const httpUrl = baseUrl
+            .replace(/^wss:/, "https:")
+            .replace(/^ws:/, "http:");
 
-        this.ws = new WebSocket(`${wsUrl}/api/v1/proctoring/media/ws`);
+        const socketUrl = `${httpUrl}/proctoring/media/ws`;
 
-        this.ws.onopen = () => {
+        this.socket = io(socketUrl, {
+            transports: ['websocket', 'polling'], // Enable polling fallback
+            reconnection: !this.manualClose && this.reconnectAttempts < this.maxReconnectAttempts,
+            reconnectionAttempts: this.maxReconnectAttempts,
+            reconnectionDelay: 1000,
+        });
+
+        this.socket.on('connect', () => {
+            this.reconnectAttempts = 0;
             this.connectParams?.onOpen();
-        };
+        });
 
-        this.ws.onerror = (error) => {
-            this.connectParams?.onError(error);
-        };
+        this.socket.on('connect_error', (error: Error) => {
+            this.connectParams?.onError(error as any);
+        });
 
-        this.ws.onclose = () => {
+        this.socket.on('disconnect', (reason: string) => {
             if (!this.manualClose && this.reconnectAttempts < this.maxReconnectAttempts) {
                 this.reconnectAttempts++;
                 setTimeout(() => {
@@ -52,21 +63,32 @@ class MediaWebSocket {
             } else {
                 this.connectParams?.onClose();
             }
-        };
+        });
     }
 
     send(data: ArrayBuffer): void {
-        if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-            this.ws.send(data);
+        if (this.socket && this.socket.connected) {
+            // Convert ArrayBuffer to base64 for SocketIO
+            const base64 = this.arrayBufferToBase64(data);
+            this.socket.emit('media_data', { data: base64 });
         }
+    }
+
+    private arrayBufferToBase64(buffer: ArrayBuffer): string {
+        const bytes = new Uint8Array(buffer);
+        let binary = '';
+        for (let i = 0; i < bytes.byteLength; i++) {
+            binary += String.fromCharCode(bytes[i]);
+        }
+        return btoa(binary);
     }
 
     disconnect(): void {
         this.manualClose = true;
         this.reconnectAttempts = 0;
-        if (this.ws) {
-            this.ws.close();
-            this.ws = null;
+        if (this.socket) {
+            this.socket.disconnect();
+            this.socket = null;
         }
     }
 }

@@ -1,6 +1,7 @@
 from fastapi import FastAPI
 import os
 from fastapi.middleware.cors import CORSMiddleware
+import socketio
 from app.api.v1 import auth_router, dashboard_router
 from app.api.v1 import interview_router
 from app.api.v1 import candidate_interview_router
@@ -60,10 +61,21 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="AI Interview Automation Mock Backend", lifespan=lifespan)
 
+# Initialize SocketIO with async mode and CORS support
+sio = socketio.AsyncServer(
+    async_mode='asgi',
+    cors_allowed_origins=os.getenv("ALLOWED_ORIGINS", "http://localhost:3002").split(","),
+    logger=True,
+    engineio_logger=True,
+    ping_timeout=60,
+    ping_interval=25
+)
+socketio_app = socketio.ASGIApp(sio, app)
+
 # CORS Middleware - Allow all origins in development
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=os.getenv("ALLOWED_ORIGINS", "http://localhost:3000").split(","),
+    allow_origins=os.getenv("ALLOWED_ORIGINS", "http://localhost:3002").split(","),
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
     allow_headers=["*"],
@@ -81,6 +93,10 @@ app.include_router(verification_router.router, prefix="/api/v1/verification", ta
 app.include_router(template_router.router, tags=["Admin Templates"])
 app.include_router(coding_router.router, prefix="/api/v1/candidate", tags=["Coding"])
 
+# Initialize SocketIO handlers in session_router
+from app.api.v1.session_router import set_sio
+set_sio(sio)
+
 @app.get("/")
 async def root():
     return {"message": "Mock Backend is running"}
@@ -89,3 +105,7 @@ async def root():
 async def health_check():
     """Health check endpoint to verify backend is running"""
     return {"status": "ok", "message": "Backend is healthy"}
+
+# Replace app with socketio_app so uvicorn runs SocketIO with polling fallback
+# This allows WebSocket connections to work behind proxies/VMs
+app = socketio_app
