@@ -21,6 +21,24 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+# Concurrency Guard: Track sessions currently generating questions in background
+_active_generations = set()
+
+# Global LLM Concurrency Limit
+import asyncio
+LLM_SEMAPHORE = asyncio.Semaphore(5)
+
+def run_background_task(coro):
+    """Safe wrapper for background tasks to catch exceptions."""
+    async def wrapper():
+        try:
+            await coro
+        except Exception as e:
+            logger.exception("Background task failed", exc_info=e)
+
+    import asyncio
+    asyncio.create_task(wrapper())
+
 # ── Mock score generation ──────────────────────────────────────────────────────
 _STRENGTH_POOL = [
     "Clear communication and structured thinking",
@@ -132,7 +150,7 @@ class InterviewSessionSQLService:
             from app.db.sql.models.interview_session_question import InterviewSessionQuestion
             from app.db.sql.models.interview_response import InterviewResponse
             
-            session_obj, _ = await InterviewSessionSQLService._get_session_and_interview(
+            session_obj, interview = await InterviewSessionSQLService._get_session_and_interview(
                 uow, session_id, candidate_id
             )
             
@@ -161,13 +179,26 @@ class InterviewSessionSQLService:
                     resp_res = await session.execute(resp_stmt)
                     completed_q = resp_res.scalar() or 0
                 
+                total_q = len(q_ids)
+                if s.section_type == "conversational":
+                    from app.db.sql.models.interview_template import InterviewTemplate
+                    template = None
+                    if interview.template_id:
+                        template = await uow.session.get(InterviewTemplate, interview.template_id)
+                    max_conv = 10
+                    if template and template.conversational_config:
+                        conv_config = template.conversational_config
+                        if isinstance(conv_config, dict):
+                            max_conv = conv_config.get("rounds", 10)
+                    total_q = max_conv
+
                 res.append({
                     "id": str(s.id),
                     "section_type": s.section_type,
                     "order_index": s.order_index,
                     "duration_minutes": s.duration_minutes,
                     "status": s.status,
-                    "total_questions": len(q_ids),
+                    "total_questions": total_q,
                     "completed_questions": completed_q,
                     "started_at": s.started_at.isoformat() if s.started_at else None,
                     "completed_at": s.completed_at.isoformat() if s.completed_at else None,
@@ -257,71 +288,8 @@ class InterviewSessionSQLService:
                     # Generate initial batch of project-based questions (generate first 2-3 questions upfront)
                     # The rest will be generated live based on answers
                     from app.services.question_generator_service import question_generator_service
-                    initial_questions_to_generate = min(3, num_conversational_questions)
-                    logger.debug(f"[start_section] Generating initial {initial_questions_to_generate} project-based questions for conversational section")
-                    
-                    previous_questions = []
-                    previous_answers = []
-                    asked_question_ids = []
-                    
-                    # Generate first few questions upfront
-                    for round_num in range(1, initial_questions_to_generate + 1):
-                        live_question = await question_generator_service.generate_live_conversational_question(
-                            resume_data=resume_data or {},
-                            jd_data=jd_data or {},
-                            previous_questions=previous_questions,
-                            previous_answers=previous_answers,
-                            asked_question_ids=asked_question_ids
-                        )
-                        
-                        if live_question and live_question.get("prompt"):
-                            question_prompt = live_question.get("prompt", "").strip()
-                            if not question_prompt:
-                                # If prompt is empty, generate a fallback
-                                question_prompt = "Tell me about your projects and experience."
-                                logger.warning(f"[start_section] Generated question had empty prompt, using fallback")
-                            
-                            # Create InterviewSessionQuestion with proper text
-                            session_question = InterviewSessionQuestion(
-                                id=uuid.uuid4(),
-                                interview_session_id=session_obj.id,
-                                section_id=section_id,
-                                custom_text=question_prompt,  # Always set proper text, never placeholder
-                                order=round_num,
-                                question_type="conversational",
-                                conversation_round=round_num
-                            )
-                            uow.session.add(session_question)
-                            
-                            # Add to previous questions for next generation
-                            previous_questions.append({
-                                "question_id": str(session_question.id),
-                                "prompt": question_prompt,
-                                "question_type": "conversational"
-                            })
-                            asked_question_ids.append(str(session_question.id))
-                            
-                            logger.debug(f"[start_section] Generated project-based question {round_num}: {question_prompt[:80]}...")
-                        else:
-                            logger.warning(f"[start_section] Failed to generate question for round {round_num}, creating fallback")
-                            # Create a fallback question with proper text instead of breaking
-                            fallback_question = InterviewSessionQuestion(
-                                id=uuid.uuid4(),
-                                interview_session_id=session_obj.id,
-                                section_id=section_id,
-                                custom_text="Tell me about your projects and experience.",
-                                order=round_num,
-                                question_type="conversational",
-                                conversation_round=round_num
-                            )
-                            uow.session.add(fallback_question)
-                            previous_questions.append({
-                                "question_id": str(fallback_question.id),
-                                "prompt": "Tell me about your projects and experience.",
-                                "question_type": "conversational"
-                            })
-                            asked_question_ids.append(str(fallback_question.id))
-                            logger.warning(f"[start_section] Created fallback question for round {round_num}")
+                    # Start background generation
+                    logger.info(f"[Session {session_id}] Conversational section started, first question will be generated on demand")
             
             await uow.flush()
             
@@ -329,7 +297,8 @@ class InterviewSessionSQLService:
                 "state": "IN_PROGRESS",
                 "section_id": str(target_section.id),
                 "section_type": target_section.section_type,
-                "status": target_section.status
+                "status": target_section.status,
+                "message": "Section started. Questions are being prepared."
             }
 
     @staticmethod
@@ -380,7 +349,7 @@ class InterviewSessionSQLService:
                 from app.db.sql.models.interview_session_section import InterviewSessionSection
                 current_section = await uow.session.get(InterviewSessionSection, session_obj.current_section_id)
                 
-                # If this is the conversational section, generate project-based questions
+                # BRANCH A: Conversational section (generate project-based questions)
                 if current_section and current_section.section_type == "conversational":
                     # Get template to find how many conversational questions should be generated
                     from app.db.sql.models.interview_template import InterviewTemplate
@@ -388,7 +357,6 @@ class InterviewSessionSQLService:
                     if interview.template_id:
                         template = await uow.session.get(InterviewTemplate, interview.template_id)
                     
-                    # Get conversational config to determine number of questions
                     num_conversational_questions = 10  # Default
                     if template and template.conversational_config:
                         conv_config = template.conversational_config
@@ -404,8 +372,8 @@ class InterviewSessionSQLService:
                     )
                     existing_count = existing_conv_questions.scalar() or 0
                     
-                    # If we haven't generated enough questions, generate more
                     if existing_count < num_conversational_questions:
+                        # Step 1: Gather context (Short DB usage)
                         # Get all previous questions and answers for context
                         all_questions_stmt = select(InterviewSessionQuestion).where(
                             InterviewSessionQuestion.interview_session_id == session_obj.id
@@ -413,7 +381,6 @@ class InterviewSessionSQLService:
                         all_questions_result = await uow.session.execute(all_questions_stmt)
                         all_questions_list = all_questions_result.scalars().all()
                         
-                        # Get all previous answers
                         all_responses_stmt = select(InterviewResponse).where(
                             InterviewResponse.session_id == session_obj.id
                         ).order_by(InterviewResponse.submitted_at)
@@ -429,7 +396,6 @@ class InterviewSessionSQLService:
                             resume_data = profile.resume_json or {"text": profile.resume_text or "", "projects": [], "skills": profile.skills or []}
                             jd_data = profile.jd_json or {"text": profile.job_description or "", "requirements": [], "required_skills": []}
                         
-                        # Prepare previous Q&A for context
                         previous_questions = []
                         previous_answers = []
                         asked_question_ids = []
@@ -444,146 +410,79 @@ class InterviewSessionSQLService:
                             asked_question_ids.append(str(q_obj.id))
                         
                         for resp in all_responses_list:
-                            a_dict = {
+                            previous_answers.append({
                                 "answer_text": resp.answer_text or "",
                                 "answer": resp.answer_text or ""
-                            }
-                            previous_answers.append(a_dict)
+                            })
                         
-                        # Generate live conversational question based on projects
-                        from app.services.question_generator_service import question_generator_service
-                        live_question = await question_generator_service.generate_live_conversational_question(
-                            resume_data=resume_data or {},
-                            jd_data=jd_data or {},
-                            previous_questions=previous_questions,
-                            previous_answers=previous_answers,
-                            asked_question_ids=asked_question_ids
-                        )
+                        current_session_id = session_obj.id
+                        current_section_id = session_obj.current_section_id
                         
-                        # Ensure prompt is not empty
-                        question_prompt = live_question.get("prompt", "").strip() if live_question else ""
-                        if not question_prompt:
-                            question_prompt = "Tell me about your projects and experience."
-                            logger.warning(f"[get_session_state] Generated question had empty prompt, using fallback")
-                        
-                        # Create InterviewSessionQuestion for the live question
-                        live_session_question = InterviewSessionQuestion(
-                            id=uuid.uuid4(),
-                            interview_session_id=session_obj.id,
-                            section_id=session_obj.current_section_id,
-                            custom_text=question_prompt,  # Always set proper text, never placeholder
-                            order=len(all_questions_list) + 1,
-                            question_type="conversational",
-                            conversation_round=existing_count + 1
-                        )
-                        uow.session.add(live_session_question)
-                        await uow.flush()
-                        
-                        # Log the generated question for debugging
-                        logger.debug(f"[get_session_state] Generated live conversational question: {question_prompt[:100]}...")
-                        
-                        # Return the live question
-                        return {
-                            "type": "conversational",
-                            "question_id": str(live_session_question.id),
-                            "question_text": live_question.get("prompt", ""),
-                            "answer_mode": live_question.get("answer_mode", "text").upper(),
-                            "time_limit_sec": live_question.get("time_limit_sec", 240),
-                            "difficulty": live_question.get("difficulty", "medium"),
-                            "question_number": len(all_questions_list) + 1,
-                            "total_questions": num_conversational_questions,
-                            "source": "live_generated"
-                        }
+                        # EXIT UnitOfWork to call LLM
+                        # (The outermost async with UnitOfWork will close here)
+                        pass 
+                
                     else:
                         raise HTTPException(
                             status_code=status.HTTP_404_NOT_FOUND, detail="No more questions in current section"
                         )
-                # Legacy: If this is the technical section and all questions are answered, generate live conversational question
+                    
+                    # --- Step 2: Call LLM OUTSIDE DB transaction ---
+                    if existing_count < num_conversational_questions:
+                        from app.services.question_generator_service import question_generator_service
+                        async with LLM_SEMAPHORE:
+                            live_question = await question_generator_service.generate_live_conversational_question(
+                                resume_data=resume_data or {},
+                                jd_data=jd_data or {},
+                                previous_questions=previous_questions,
+                                previous_answers=previous_answers,
+                                asked_question_ids=asked_question_ids
+                            )
+                        
+                        # --- Step 3: Re-open session for write ---
+                        async with UnitOfWork(session) as uow:
+                            question_prompt = live_question.get("prompt", "").strip() if live_question else ""
+                            if not question_prompt:
+                                question_prompt = "Tell me about your projects and experience."
+                            
+                            live_session_question = InterviewSessionQuestion(
+                                id=uuid.uuid4(),
+                                interview_session_id=current_session_id,
+                                section_id=current_section_id,
+                                custom_text=question_prompt,
+                                order=len(all_questions_list) + 1,
+                                question_type="conversational",
+                                conversation_round=existing_count + 1
+                            )
+                            uow.session.add(live_session_question)
+                            await uow.flush()
+
+                            conv_count_stmt = select(func.count(InterviewSessionQuestion.id)).where(
+                                InterviewSessionQuestion.interview_session_id == session_obj.id,
+                                InterviewSessionQuestion.section_id == session_obj.current_section_id,
+                                InterviewSessionQuestion.question_type == "conversational"
+                            )
+                            conv_count_result = await uow.session.execute(conv_count_stmt)
+                            conv_question_number = conv_count_result.scalar() or 1
+                            
+                            return {
+                                "type": "conversational",
+                                "question_id": str(live_session_question.id),
+                                "question_text": live_question.get("prompt", ""),
+                                "answer_mode": live_question.get("answer_mode", "text").upper(),
+                                "time_limit_sec": live_question.get("time_limit_sec", 240),
+                                "difficulty": live_question.get("difficulty", "medium"),
+                                "question_number": conv_question_number,
+                                "total_questions": num_conversational_questions,
+                                "source": "live_generated"
+                            }
+
+                # BRANCH B: Technical section (potential legacy fallback)
                 elif current_section and current_section.section_type == "technical":
-                    # Get all previous questions and answers for context
-                    all_questions_stmt = select(InterviewSessionQuestion).where(
-                        InterviewSessionQuestion.interview_session_id == session_obj.id
-                    ).order_by(InterviewSessionQuestion.order)
-                    all_questions_result = await session.execute(all_questions_stmt)
-                    all_questions_list = all_questions_result.scalars().all()
-                    
-                    # Get all previous answers
-                    all_responses_stmt = select(InterviewResponse).where(
-                        InterviewResponse.session_id == session_obj.id
-                    ).order_by(InterviewResponse.submitted_at)
-                    all_responses_result = await session.execute(all_responses_stmt)
-                    all_responses_list = all_responses_result.scalars().all()
-                    
-                    # Get candidate profile for resume/JD data
-                    candidate = await uow.users.get_by_id(candidate_id)
-                    resume_data = None
-                    jd_data = None
-                    if candidate and candidate.candidate_profile:
-                        profile = candidate.candidate_profile
-                        resume_data = profile.resume_json or {"text": profile.resume_text or "", "projects": [], "skills": profile.skills or []}
-                        jd_data = profile.jd_json or {"text": profile.job_description or "", "requirements": [], "required_skills": []}
-                    
-                    # Prepare previous Q&A for context
-                    previous_questions = []
-                    previous_answers = []
-                    asked_question_ids = []
-                    
-                    for q_obj in all_questions_list:
-                        q_dict = {
-                            "question_id": str(q_obj.id),
-                            "prompt": q_obj.custom_text or (q_obj.question.text if q_obj.question else ""),
-                            "question_type": getattr(q_obj, "question_type", "technical")
-                        }
-                        previous_questions.append(q_dict)
-                        asked_question_ids.append(str(q_obj.id))
-                    
-                    for resp in all_responses_list:
-                        a_dict = {
-                            "answer_text": resp.answer_text or "",
-                            "answer": resp.answer_text or ""
-                        }
-                        previous_answers.append(a_dict)
-                    
-                    # Generate live conversational question
-                    from app.services.question_generator_service import question_generator_service
-                    live_question = await question_generator_service.generate_live_conversational_question(
-                        resume_data=resume_data or {},
-                        jd_data=jd_data or {},
-                        previous_questions=previous_questions,
-                        previous_answers=previous_answers,
-                        asked_question_ids=asked_question_ids
+                    # Logic for technical section when questions run out
+                    raise HTTPException(
+                        status_code=status.HTTP_404_NOT_FOUND, detail="No more questions in technical section"
                     )
-                    
-                    # Ensure prompt is not empty
-                    question_prompt = live_question.get("prompt", "").strip() if live_question else ""
-                    if not question_prompt:
-                        question_prompt = "Tell me about your projects and experience."
-                        logger.warning(f"[get_session_state] Generated question had empty prompt, using fallback")
-                    
-                    # Create InterviewSessionQuestion for the live question
-                    live_session_question = InterviewSessionQuestion(
-                        id=uuid.uuid4(),
-                        interview_session_id=session_obj.id,
-                        section_id=session_obj.current_section_id,
-                        custom_text=question_prompt,  # Always set proper text, never placeholder
-                        order=len(all_questions_list) + 1,
-                        question_type="conversational"
-                    )
-                    session.add(live_session_question)
-                    await session.flush()
-                    
-                    # Return the live question
-                    return {
-                        "type": "conversational",
-                        "question_id": str(live_session_question.id),
-                        "question_text": live_question.get("prompt", ""),
-                        "answer_mode": live_question.get("answer_mode", "text").upper(),
-                        "time_limit_sec": live_question.get("time_limit_sec", 240),
-                        "difficulty": live_question.get("difficulty", "medium"),
-                        "question_number": len(all_questions_list) + 1,
-                        "total_questions": len(all_questions_list) + 1,  # Will increase as more are generated
-                        "source": "live_generated"
-                    }
                 else:
                     raise HTTPException(
                         status_code=status.HTTP_404_NOT_FOUND, detail="No more questions in current section"
@@ -676,21 +575,27 @@ class InterviewSessionSQLService:
                     
                     asked_question_ids = [str(pq.id) for pq in prev_questions_list]
                     
-                    # Generate new question
-                    from app.services.question_generator_service import question_generator_service
-                    live_question = await question_generator_service.generate_live_conversational_question(
-                        resume_data=resume_data or {},
-                        jd_data=jd_data or {},
-                        previous_questions=previous_questions,
-                        previous_answers=previous_answers,
-                        asked_question_ids=asked_question_ids
-                    )
+                    # Store necessary data briefly
+                    current_section_id = session_obj.current_section_id
                     
-                    # Update the question with the generated text
-                    q.custom_text = live_question.get("prompt", "Tell me about your projects.")
-                    question_text = q.custom_text
-                    await uow.flush()
-                    logger.debug(f"[get_session_state] Generated and updated question text: {question_text[:80]}...")
+                    # --- Step 2: Call LLM OUTSIDE DB transaction ---
+                    from app.services.question_generator_service import question_generator_service
+                    async with LLM_SEMAPHORE:
+                        live_question = await question_generator_service.generate_live_conversational_question(
+                            resume_data=resume_data or {},
+                            jd_data=jd_data or {},
+                            previous_questions=previous_questions,
+                            previous_answers=previous_answers,
+                            asked_question_ids=asked_question_ids
+                        )
+                    
+                    # --- Step 3: Re-open session for write ---
+                    async with UnitOfWork(session) as uow:
+                        # Update the question with the generated text
+                        q.custom_text = live_question.get("prompt", "Tell me about your projects.")
+                        question_text = q.custom_text
+                        await uow.flush()
+                        logger.debug(f"[get_session_state] Generated and updated question text: {question_text[:80]}...")
                 
                 # Ensure question_text is not empty
                 if not question_text or question_text.strip() == "":
@@ -698,6 +603,17 @@ class InterviewSessionSQLService:
                     logger.warning(f"[get_session_state] Using fallback question text for question {q.id}")
                 
                 logger.debug(f"[get_session_state] Returning conversational question: '{question_text[:100]}...'")
+                
+                from app.db.sql.models.interview_template import InterviewTemplate
+                template = None
+                if interview.template_id:
+                    template = await uow.session.get(InterviewTemplate, interview.template_id)
+                num_conversational_questions = 10
+                if template and template.conversational_config:
+                    conv_config = template.conversational_config
+                    if isinstance(conv_config, dict):
+                        num_conversational_questions = conv_config.get("rounds", 10)
+
                 return {
                     "type": "conversational",
                     "conversation_round": q.conversation_round or 1,
@@ -707,7 +623,7 @@ class InterviewSessionSQLService:
                     "question_text": question_text,
                     "question_id": str(q.id),
                     "question_number": answered_count_in_section + 1,
-                    "total_questions": len(questions),
+                    "total_questions": num_conversational_questions,
                 }
 
             # ── TECHNICAL branch ──────────────────────────────────────────────
@@ -1023,7 +939,35 @@ class InterviewSessionSQLService:
             
             # Check if this section is now complete
             new_unanswered_count = len(unanswered_questions) - 1
-            is_section_complete = new_unanswered_count == 0
+
+            # For conversational sections, check against template config rounds
+            # not just DB question count (questions are generated on demand)
+            if q_type == "conversational":
+                from app.db.sql.models.interview_template import InterviewTemplate
+                template = None
+                if interview.template_id:
+                    template = await uow.session.get(InterviewTemplate, interview.template_id)
+                num_conversational_questions = 10  # default
+                if template and template.conversational_config:
+                    conv_config = template.conversational_config
+                    if isinstance(conv_config, dict):
+                        num_conversational_questions = conv_config.get("rounds", 10)
+                # Count only conversational answers for this section
+                conv_answered_stmt = select(func.count(InterviewResponse.id)).where(
+                    InterviewResponse.session_id == session_obj.id,
+                    InterviewResponse.question_id.in_(
+                        select(InterviewSessionQuestion.id).where(
+                            InterviewSessionQuestion.interview_session_id == session_obj.id,
+                            InterviewSessionQuestion.section_id == session_obj.current_section_id,
+                            InterviewSessionQuestion.question_type == "conversational"
+                        )
+                    )
+                )
+                conv_answered_result = await uow.session.execute(conv_answered_stmt)
+                conv_answered_count = (conv_answered_result.scalar() or 0) + 1  # +1 for current answer
+                is_section_complete = conv_answered_count >= num_conversational_questions
+            else:
+                is_section_complete = new_unanswered_count == 0
 
             return_state = "IN_PROGRESS"
 
@@ -1247,3 +1191,100 @@ class InterviewSessionSQLService:
                 })
                 
             return summary
+
+    @staticmethod
+    async def _background_generate_conversational_questions(
+        session_id: uuid.UUID,
+        section_id: uuid.UUID,
+        candidate_id: uuid.UUID,
+        interview_template_id: Optional[uuid.UUID],
+        num_conversational_questions: int
+    ):
+        """Background task to generate conversational questions without blocking the main request."""
+        from app.db.sql.session import AsyncSessionLocal
+        from app.db.sql.models.interview_session_question import InterviewSessionQuestion
+        from app.db.sql.models.user import User
+        from app.services.question_generator_service import question_generator_service
+        
+        if session_id in _active_generations:
+            return
+        
+        _active_generations.add(session_id)
+        logger.info(f"[Session {session_id}] Background generation STARTED")
+        
+        try:
+            # Step 1: Fetch required data (short DB usage)
+            resume_data = None
+            jd_data = None
+            num_to_generate = 0
+            
+            async with AsyncSessionLocal() as db:
+                # Check idempotency: do questions already exist?
+                existing_stmt = select(func.count(InterviewSessionQuestion.id)).where(
+                    InterviewSessionQuestion.interview_session_id == session_id,
+                    InterviewSessionQuestion.section_id == section_id
+                )
+                existing_res = await db.execute(existing_stmt)
+                if (existing_res.scalar() or 0) > 0:
+                    logger.info(f"[Session {session_id}] Questions already exist, skipping background generation")
+                    return
+
+                # Get data needed for generation
+                candidate_result = await db.execute(
+                    select(User).options(selectinload(User.candidate_profile)).where(User.id == candidate_id)
+                )
+                candidate = candidate_result.scalar_one_or_none()
+                
+                if candidate and candidate.candidate_profile:
+                    profile = candidate.candidate_profile
+                    resume_data = profile.resume_json or {"text": profile.resume_text or "", "projects": [], "skills": profile.skills or []}
+                    jd_data = profile.jd_json or {"text": profile.job_description or "", "requirements": [], "required_skills": []}
+                
+                num_to_generate = min(3, num_conversational_questions)
+
+            # Step 2: Call LLM OUTSIDE DB session
+            previous_questions = []
+            previous_answers = []
+            asked_question_ids = []
+
+            for round_num in range(1, num_to_generate + 1):
+                # Wrap ONLY LLM call with global semaphore
+                async with LLM_SEMAPHORE:
+                    live_question = await question_generator_service.generate_live_conversational_question(
+                        resume_data=resume_data or {},
+                        jd_data=jd_data or {},
+                        previous_questions=previous_questions,
+                        previous_answers=previous_answers,
+                        asked_question_ids=asked_question_ids
+                    )
+                
+                question_prompt = live_question.get("prompt", "Tell me about your projects and experience.").strip()
+                
+                # Step 3: Open new DB session for write
+                async with AsyncSessionLocal() as db:
+                    async with db.begin():
+                        session_question = InterviewSessionQuestion(
+                            id=uuid.uuid4(),
+                            interview_session_id=session_id,
+                            section_id=section_id,
+                            custom_text=question_prompt,
+                            order=round_num,
+                            question_type="conversational",
+                            conversation_round=round_num
+                        )
+                        db.add(session_question)
+                
+                previous_questions.append({
+                    "question_id": str(session_question.id),
+                    "prompt": question_prompt,
+                    "question_type": "conversational"
+                })
+                asked_question_ids.append(str(session_question.id))
+                logger.info(f"[Session {session_id}] Generated background question {round_num}")
+
+        except Exception as e:
+            logger.error(f"[Session {session_id}] Background generation FAILED: {e}", exc_info=True)
+            raise
+        finally:
+            _active_generations.discard(session_id)
+            logger.info(f"[Session {session_id}] Background generation FINISHED")

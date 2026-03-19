@@ -17,6 +17,7 @@ import { useEffect as useEffectImport } from "react";
 export default function InterviewShell() {
     const router = useRouter();
     const currentQuestion = useInterviewStore((s) => s.currentQuestion);
+    const isLoadingQuestion = useInterviewStore((s) => s.isLoadingQuestion);
     const state = useInterviewStore((s) => s.state);
     const isSubmitting = useInterviewStore((s) => s.isSubmitting);
     const submitAnswer = useInterviewStore((s) => s.submitAnswer);
@@ -249,37 +250,33 @@ export default function InterviewShell() {
         },
     });
 
-    if (state !== "QUESTION_ASKED" || !currentQuestion) {
+    if (state !== "QUESTION_ASKED" || (!currentQuestion && !isLoadingQuestion)) {
         return null;
     }
 
-    const handleSubmit = () => {
+    const handleSubmit = (isExpired: boolean = false) => {
         if (isSubmitting) return;
         if (currentQuestion?.type === "coding") {
             submitCurrentCode(interviewId || undefined);
             return;
         }
-        // Allow submission if there's any content (trimmed)
-        if (!answerPayload || !answerPayload.trim()) return;
-
+        // If timer expired, submit whatever we have (even empty = "NA")
+        const payload = isExpired
+            ? (answerPayload?.trim() || "NA")
+            : answerPayload?.trim();
+        if (!isExpired && !payload) return;
+        if (!currentQuestion) return;
         submitAnswer({
             question_id: currentQuestion.question_id,
             answer_type: currentQuestion.answer_mode,
-            answer_payload: answerPayload.trim(),
+            answer_payload: payload,
         });
     };
 
-    const handleCompleteSection = async () => {
-        if (isSubmitting) return;
-        try {
-            await completeSection();
-        } catch (error) {
-            console.error("Failed to complete section:", error);
-        }
-    };
+
 
     // ─── Coding questions get their own full-screen IDE layout ───
-    if (currentQuestion.type === "coding") {
+    if (currentQuestion?.type === "coding") {
         return <CodingQuestion question={currentQuestion} interviewId={interviewId} />;
     }
 
@@ -319,49 +316,84 @@ export default function InterviewShell() {
 
             {/* Main Content Area */}
             <div className="flex-1 flex flex-col overflow-hidden">
-                {/* Submit Section Button */}
-                <div className="bg-white border-b border-gray-200 px-6 py-3 flex justify-end">
+                {/* Improved Top Bar */}
+                <div className="bg-white border-b border-gray-200 px-6 py-4 flex justify-between items-center shadow-sm">
+                    <div className="flex items-center gap-3">
+                        <div className="w-2 h-2 bg-emerald-500 rounded-full animate-pulse" />
+                        <span className="text-xs font-bold text-gray-500 uppercase tracking-widest bg-gray-50 px-3 py-1 rounded-full border border-gray-100">
+                            Interview in Progress
+                        </span>
+                    </div>
                     <button
-                        onClick={handleCompleteSection}
+                        onClick={completeSection}
                         disabled={isSubmitting}
-                        className="px-4 py-2 bg-amber-600 text-white rounded-lg font-medium hover:bg-amber-700 disabled:bg-gray-400 disabled:cursor-not-allowed transition-colors flex items-center gap-2"
+                        className="px-6 py-2.5 bg-amber-600 text-white rounded-xl font-bold hover:bg-amber-700 disabled:bg-gray-300 disabled:shadow-none disabled:cursor-not-allowed transition-all shadow-lg shadow-amber-200 flex items-center gap-2 active:scale-95"
                     >
-                        <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
+                        <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" strokeWidth={2.5} stroke="currentColor">
                             <path strokeLinecap="round" strokeLinejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
                         </svg>
-                        {isSubmitting ? "Submitting..." : "Submit Section"}
+                        <span>{isSubmitting ? "Submitting..." : "Submit Section"}</span>
                     </button>
                 </div>
-                <div className="flex-1 overflow-y-auto p-6">
-                    <div className="max-w-4xl mx-auto flex flex-col gap-6">
+
+                <div className="flex-1 overflow-y-auto p-6 md:p-10">
+                    <div className="max-w-4xl mx-auto flex flex-col gap-8">
                         <div className="flex justify-between items-center">
-                            <h2 className="text-xl font-bold">Question</h2>
-                            <Timer durationSec={currentQuestion.time_limit_sec} onExpire={handleSubmit} />
+                            <div className="flex items-center gap-3">
+                                <h2 className="text-2xl font-bold text-gray-900 tracking-tight">Question</h2>
+                                <span className="px-3 py-1 bg-blue-100 text-blue-700 text-sm font-bold rounded-full border border-blue-200 shadow-sm">
+                                    {currentQuestion?.question_number ?? ""} / {currentQuestion?.total_questions ?? ""}
+                                </span>
+                            </div>
+                            {currentQuestion && (
+                                <Timer durationSec={currentQuestion.time_limit_sec} onExpire={() => handleSubmit(true)} />
+                            )}
                         </div>
 
-                        <QuestionPanel question={currentQuestion} />
+                        {isLoadingQuestion ? (
+                            <div className="flex flex-col items-center justify-center py-20 gap-4">
+                                <div className="w-12 h-12 border-4 border-blue-100 border-t-blue-600 rounded-full animate-spin" />
+                                <p className="text-gray-500 font-medium">Generating your next question...</p>
+                            </div>
+                        ) : (
+                            <>
+                                {currentQuestion && (
+                                    <>
+                                        <div className="shadow-xl shadow-gray-200/50">
+                                            <QuestionPanel question={currentQuestion} />
+                                        </div>
 
-                        <AnswerPanel
-                            mode={currentQuestion.answer_mode}
-                            value={answerPayload}
-                            onChange={setAnswerPayload}
-                            questionId={currentQuestion.question_id}
-                            onVoiceStart={async () => {
-                                // Voice verification will be handled by the AnswerPanel's audio stream
-                            }}
-                        />
+                                        <div className="shadow-lg shadow-gray-200/50 rounded-xl overflow-hidden">
+                                            <AnswerPanel
+                                                mode={currentQuestion.answer_mode}
+                                                value={answerPayload}
+                                                onChange={setAnswerPayload}
+                                                questionId={currentQuestion.question_id}
+                                                onVoiceStart={() => {}}
+                                            />
+                                        </div>
+                                    </>
+                                )}
+                            </>
+                        )}
 
-                        <button
-                            onClick={handleSubmit}
-                            disabled={
-                                isSubmitting ||
-                                !answerPayload ||
-                                !answerPayload.trim()
-                            }
-                            className="mt-4 px-6 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed self-end transition-colors"
-                        >
-                            {isSubmitting ? "Submitting..." : "Submit Answer"}
-                        </button>
+                        {/* Improved Submit Answer Button - Aligned Right */}
+                        <div className="flex justify-end mt-4 mb-20">
+                            <button
+                                onClick={() => handleSubmit()}
+                                disabled={
+                                    isSubmitting ||
+                                    !answerPayload ||
+                                    !answerPayload.trim()
+                                }
+                                className="px-10 py-4 bg-blue-600 text-white rounded-xl font-bold text-lg hover:bg-blue-700 disabled:bg-gray-300 disabled:shadow-none disabled:cursor-not-allowed transition-all shadow-xl shadow-blue-200 flex items-center gap-3 active:scale-95 group"
+                            >
+                                <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6 group-hover:translate-x-1 transition-transform" fill="none" viewBox="0 0 24 24" strokeWidth={2.5} stroke="currentColor">
+                                    <path strokeLinecap="round" strokeLinejoin="round" d="M6 12L3.269 3.126A59.768 59.768 0 0121.485 12 59.77 59.77 0 013.27 20.876L5.999 12zm0 0h7.5" />
+                                </svg>
+                                <span>{isSubmitting ? "Submitting..." : "Submit Answer"}</span>
+                            </button>
+                        </div>
                     </div>
                 </div>
             </div>

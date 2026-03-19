@@ -317,7 +317,7 @@ export default function AnswerPanel({
     if (mode === "CODE") {
         return (
             <textarea
-                className="w-full h-64 p-4 border rounded font-mono text-sm"
+                className="w-full h-64 p-4 border rounded font-mono text-sm text-gray-900"
                 value={value}
                 onChange={(e) => onChange(e.target.value)}
                 placeholder="Write your code here..."
@@ -328,7 +328,7 @@ export default function AnswerPanel({
     if (mode === "TEXT") {
         return (
             <textarea
-                className="w-full h-48 p-4 border rounded text-sm"
+                className="w-full h-48 p-4 border rounded text-sm text-gray-900"
                 value={value}
                 onChange={(e) => onChange(e.target.value)}
                 placeholder="Type your answer here..."

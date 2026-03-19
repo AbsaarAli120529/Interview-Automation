@@ -1,13 +1,16 @@
 "use client";
 
 import { useInterviewStore } from "@/store/interviewStore";
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { interviewService } from "@/lib/interviewService";
 
 export default function SectionSelector() {
     const sections = useInterviewStore(s => s.sections);
     const startSection = useInterviewStore(s => s.startSection);
+    const isSectionLoading = useInterviewStore(s => s.isSectionLoading);
     const error = useInterviewStore(s => s.error);
+
+    const [loadingSectionType, setLoadingSectionType] = useState<string | null>(null);
 
     // If sections wasn't fetched yet for some reason, fetch them.
     useEffect(() => {
@@ -24,7 +27,20 @@ export default function SectionSelector() {
     };
 
     return (
-        <div className="flex flex-col items-center justify-center min-h-screen p-6">
+        <div className="flex flex-col items-center justify-center min-h-screen p-6 relative">
+            {/* Full-screen loading overlay */}
+            {isSectionLoading && (
+                <div className="fixed inset-0 z-[100] bg-slate-900/40 backdrop-blur-md flex flex-col items-center justify-center animate-fadeIn">
+                    <div className="bg-white p-8 rounded-3xl shadow-2xl flex flex-col items-center gap-4 text-center max-w-xs scale-in">
+                        <div className="relative w-16 h-16">
+                            <div className="absolute inset-0 border-4 border-blue-50 rounded-full"></div>
+                            <div className="absolute inset-0 border-4 border-t-blue-600 border-r-transparent border-b-transparent border-l-transparent rounded-full animate-spin"></div>
+                        </div>
+                        <h3 className="text-xl font-extrabold text-gray-900 leading-tight">Generating your questions</h3>
+                        <p className="text-gray-500 text-sm font-medium">Please wait while our AI engine personalizes your interview experience...</p>
+                    </div>
+                </div>
+            )}
             <div className="w-full max-w-3xl glass-card rounded-2xl p-8 animate-fadeIn">
                 <div className="mb-10 text-center">
                     <h1 className="text-3xl font-extrabold text-gray-900 tracking-tight">Interview Sections</h1>
@@ -87,7 +103,11 @@ export default function SectionSelector() {
                                     <div className="space-y-2">
                                         <div className="flex justify-between text-xs font-bold text-gray-500 uppercase tracking-tight">
                                             <span>Progress</span>
-                                            <span>{section.completed_questions}/{section.total_questions} Questions</span>
+                                            {section.total_questions === 0 ? (
+                                                <span className="text-xs font-bold text-blue-600 bg-blue-50 px-2 py-0.5 rounded-full border border-blue-100 uppercase tracking-widest italic">Dynamic</span>
+                                            ) : (
+                                                <span>{section.completed_questions}/{section.total_questions} Questions</span>
+                                            )}
                                         </div>
                                         <div className="h-2 w-full bg-gray-200/50 rounded-full overflow-hidden">
                                             <div
@@ -105,13 +125,24 @@ export default function SectionSelector() {
                                         </div>
                                     ) : (
                                         <button
-                                            onClick={() => startSection(section.section_type)}
-                                            className={`relative overflow-hidden group/btn px-8 py-3 rounded-xl font-bold text-sm uppercase transition-all duration-300 shadow-lg active:scale-95 ${section.status === "in_progress"
+                                            onClick={() => {
+                                                setLoadingSectionType(section.section_type);
+                                                startSection(section.section_type);
+                                            }}
+                                            disabled={isSectionLoading}
+                                            className={`relative overflow-hidden group/btn px-8 py-3 rounded-xl font-extrabold text-sm uppercase transition-all duration-300 shadow-lg active:scale-95 flex items-center gap-2 ${section.status === "in_progress"
                                                 ? "bg-blue-600 text-white hover:bg-blue-700 shadow-blue-200"
                                                 : "bg-white text-blue-600 border border-blue-200 hover:border-blue-400 hover:bg-blue-50 shadow-gray-100"
-                                                }`}
+                                                } ${isSectionLoading ? 'opacity-70 cursor-not-allowed grayscale-[0.5]' : ''}`}
                                         >
-                                            <span className="relative z-10">{section.status === "in_progress" ? "Resume" : "Start Section"}</span>
+                                            {isSectionLoading && loadingSectionType === section.section_type ? (
+                                                <>
+                                                    <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                                                    <span>Preparing...</span>
+                                                </>
+                                            ) : (
+                                                <span className="relative z-10">{section.status === "in_progress" ? "Resume" : "Start Section"}</span>
+                                            )}
                                         </button>
                                     )}
                                 </div>

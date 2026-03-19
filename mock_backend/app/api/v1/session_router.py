@@ -296,9 +296,14 @@ def _register_socketio_handlers():
     
     @_sio.on('media_data', namespace='/proctoring/media/ws')
     async def media_data(sid, data):
-        """Handle media data (video/audio frames) - just acknowledge"""
-        # Media data is received but not processed in this mock version
-        pass
+        """Handle media data (video/audio frames) - log size and acknowledge"""
+        payload = data.get("data", "") if isinstance(data, dict) else data
+        size = len(payload)
+
+        if size > 500_000:  # ~500KB threshold
+            logger.warning(f"[media_ws] Large payload detected | sid={sid} size={size}")
+        else:
+            logger.debug(f"[media_ws] sid={sid} size={size}")
 
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────

@@ -14,8 +14,10 @@ interface InterviewStore {
     currentQuestion: QuestionResponse | null;
     terminationReason: string | null;
     isSubmitting: boolean;
+    isSectionLoading: boolean;
     isConnected: boolean;
     error: string | null;
+    isLoadingQuestion: boolean;
 
     sections: import("@/types/api").InterviewSection[];
     currentSection: import("@/types/api").InterviewSection | null;
@@ -40,8 +42,10 @@ export const useInterviewStore = create<InterviewStore>((set, get) => ({
     currentQuestion: null,
     terminationReason: null,
     isSubmitting: false,
+    isSectionLoading: false,
     isConnected: false,
     error: null,
+    isLoadingQuestion: false,
     sections: [],
     currentSection: null,
 
@@ -88,15 +92,21 @@ export const useInterviewStore = create<InterviewStore>((set, get) => ({
     },
 
     fetchNextQuestion: async () => {
-        set({ error: null });
-        if (get().state !== "IN_PROGRESS") return;
+        set({ error: null, isLoadingQuestion: true });
 
         try {
             const question = await interviewService.fetchNextQuestion();
             set({ currentQuestion: question, state: "QUESTION_ASKED" });
         } catch (error) {
-            const errorMessage = error instanceof Error ? error.message : "Failed to fetch question";
+            console.error("[fetchNextQuestion] Error:", error);
+            const errorMessage = error instanceof Error 
+                ? error.message 
+                : typeof error === 'string' 
+                    ? error 
+                    : "Failed to fetch question";
             set({ error: errorMessage });
+        } finally {
+            set({ isLoadingQuestion: false });
         }
     },
 
@@ -129,7 +139,12 @@ export const useInterviewStore = create<InterviewStore>((set, get) => ({
                 set({ state });
             }
         } catch (error) {
-            const errorMessage = error instanceof Error ? error.message : "Failed to submit answer";
+            console.error("[submitAnswer] Error:", error);
+            const errorMessage = error instanceof Error 
+                ? error.message 
+                : typeof error === 'string' 
+                    ? error 
+                    : "Failed to submit answer";
             set({ error: errorMessage });
         } finally {
             set({ isSubmitting: false });
@@ -196,7 +211,7 @@ export const useInterviewStore = create<InterviewStore>((set, get) => ({
 
     // Optional explicit startSection handler
     startSection: async (sectionType: string) => {
-        set({ error: null });
+        set({ error: null, isSectionLoading: true });
         try {
             const state = await interviewService.startSection(sectionType);
             set({ state });
@@ -211,6 +226,8 @@ export const useInterviewStore = create<InterviewStore>((set, get) => ({
         } catch (error) {
             const errorMessage = error instanceof Error ? error.message : "Failed to start section";
             set({ error: errorMessage });
+        } finally {
+            set({ isSectionLoading: false });
         }
     }
 }));
